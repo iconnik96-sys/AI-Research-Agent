@@ -446,6 +446,22 @@ class MockResearchRepository(BaseResearchRepository):
     async def fail_session(self, session_id: str, error_message: str) -> None:
         self.failed_sessions[session_id] = error_message
 
+    async def delete_session(self, session_id: str) -> None:
+        if not hasattr(self, "deleted_sessions"):
+            self.deleted_sessions = []
+        self.deleted_sessions.append(session_id)
+        if session_id in self.completed_sessions:
+            del self.completed_sessions[session_id]
+        if session_id in self.sources_saved:
+            del self.sources_saved[session_id]
+        if session_id in self.documents_saved:
+            del self.documents_saved[session_id]
+        if session_id in self.chunks_saved:
+            del self.chunks_saved[session_id]
+        if session_id in self.claims_saved:
+            del self.claims_saved[session_id]
+
+
 
 @pytest.fixture
 def client():

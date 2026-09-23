@@ -72,6 +72,9 @@ class FakeResearchRepository(BaseResearchRepository):
     async def fail_session(self, session_id: str, error_message: str) -> None:
         pass
 
+    async def delete_session(self, session_id: str) -> None:
+        pass
+
     async def search_similar_chunks(
         self,
         query_embedding: List[float],

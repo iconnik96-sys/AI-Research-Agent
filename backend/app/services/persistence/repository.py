@@ -389,3 +389,22 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
                     await db.commit()
         except Exception as exc:
             logger.warning("Could not record failure status for session %s: %s", session_id, _sanitize_error(exc))
+
+    async def delete_session(
+        self,
+        session_id: str,
+    ) -> None:
+        factory = self._get_factory()
+        try:
+            session_uuid = uuid.UUID(session_id)
+            async with factory() as db:
+                session_model = await db.get(ResearchSessionModel, session_uuid)
+                if session_model:
+                    await db.delete(session_model)
+                    await db.commit()
+        except Exception as exc:
+            logger.error("Failed to delete session %s: %s", session_id, _sanitize_error(exc))
+            raise DatabaseConnectionError(
+                f"Database error deleting session: {_sanitize_error(exc)}"
+            ) from exc
+

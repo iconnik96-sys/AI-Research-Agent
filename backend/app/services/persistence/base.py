@@ -139,3 +139,16 @@ class BaseResearchRepository(ABC):
             error_message: Reason for the failure.
         """
         pass
+
+    @abstractmethod
+    async def delete_session(
+        self,
+        session_id: str,
+    ) -> None:
+        """Delete a research session and all associated cascade-linked records.
+
+        Args:
+            session_id: The session UUID string.
+        """
+        pass
+

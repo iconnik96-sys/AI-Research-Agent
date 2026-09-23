@@ -458,3 +458,22 @@ async def test_save_claims_db_error(mock_session_factory, mock_db_session, monke
     with pytest.raises(DatabaseConnectionError, match="Database error persisting claims"):
         await repo.save_claims(session_id=str(uuid.uuid4()), claims=claims, evidence_map={})
 
+
+@pytest.mark.anyio
+async def test_delete_session_success(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = uuid.uuid4()
+    mock_session_model = ResearchSessionModel(
+        id=test_session_id,
+        question="What is fusion?",
+        status="completed",
+    )
+    mock_db_session.get.return_value = mock_session_model
+
+    await repo.delete_session(session_id=str(test_session_id))
+    mock_db_session.delete.assert_awaited_once_with(mock_session_model)
+    mock_db_session.commit.assert_awaited_once()
+
+

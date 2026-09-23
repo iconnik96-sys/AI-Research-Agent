@@ -1,0 +1,367 @@
+{
+  "version": "1.0.0",
+  "name": "research_benchmark_v1",
+  "description": "Standardized benchmark suite for evaluating end-to-end AI research agent quality across planning, retrieval, grounding, citation integrity, and latency.",
+  "cases": [
+    {
+      "id": "case-001",
+      "question": "What are the primary technical bottlenecks preventing commercial-scale net-gain fusion power?",
+      "category": "science",
+      "expected_dimensions": [
+        {
+          "name": "Tritium Supply",
+          "match_terms": ["tritium", "breeding", "tritium breeding"]
+        },
+        {
+          "name": "Materials Damage",
+          "match_terms": ["neutron", "flux", "materials degradation", "first wall"]
+        },
+        {
+          "name": "Plasma Confinement",
+          "match_terms": ["confinement", "plasma stability", "turbulence", "disruption"]
+        }
+      ],
+      "expected_source_types": ["peer-reviewed / academic", "technical documentation"],
+      "reference_facts": [
+        "Commercial D-T fusion requires breeding tritium using lithium blankets.",
+        "14 MeV high-energy neutrons cause severe material displacement damage in the first wall."
+      ]
+    },
+    {
+      "id": "case-002",
+      "question": "How do mRNA vaccines elicit immunological memory compared to traditional attenuated viral vaccines?",
+      "category": "science",
+      "expected_dimensions": [
+        {
+          "name": "Antigen Expression",
+          "match_terms": ["antigen", "translation", "lipid nanoparticle", "lnp"]
+        },
+        {
+          "name": "T-Cell Activation",
+          "match_terms": ["cd4", "cd8", "t cell", "cellular immunity"]
+        },
+        {
+          "name": "Antibody Durability",
+          "match_terms": ["durability", "b cell", "neutralizing antibodies", "affinity maturation"]
+        }
+      ],
+      "expected_source_types": ["peer-reviewed immunology", "medical journal"],
+      "reference_facts": [
+        "mRNA vaccines deliver instructions via lipid nanoparticles to translate target antigens intracellularly.",
+        "Both CD4+ helper and CD8+ cytotoxic T cells are stimulated alongside germinal center B-cell responses."
+      ]
+    },
+    {
+      "id": "case-003",
+      "question": "What are the biological mechanisms of cellular senescence and how does it contribute to mammalian aging?",
+      "category": "science",
+      "expected_dimensions": [
+        {
+          "name": "DNA Damage / Telomeres",
+          "match_terms": ["telomere", "dna damage", "senescence", "cell cycle arrest"]
+        },
+        {
+          "name": "SASP Phenotype",
+          "match_terms": ["sasp", "secretory phenotype", "cytokines", "inflammation"]
+        },
+        {
+          "name": "Immune Clearance",
+          "match_terms": ["clearance", "macrophage", "senolytic", "immune surveillance"]
+        }
+      ],
+      "expected_source_types": ["biology review", "gerontology research"],
+      "reference_facts": [
+        "Senescent cells undergo irreversible cell-cycle arrest driven by p53/p21 and p16 pathways.",
+        "The senescence-associated secretory phenotype (SASP) releases pro-inflammatory cytokines damaging surrounding tissue."
+      ]
+    },
+    {
+      "id": "case-004",
+      "question": "What are the comparative trade-offs between dense Transformers and Mixture-of-Experts (MoE) architectures during inference?",
+      "category": "ai_ml",
+      "expected_dimensions": [
+        {
+          "name": "Parameter Activation",
+          "match_terms": ["sparse", "active parameters", "routing", "expert"]
+        },
+        {
+          "name": "Memory & Bandwidth",
+          "match_terms": ["vram", "memory bandwidth", "memory footprint", "kv cache"]
+        },
+        {
+          "name": "Routing Overhead",
+          "match_terms": ["token routing", "expert capacity", "load balancing", "communication overhead"]
+        }
+      ],
+      "expected_source_types": ["machine learning papers", "systems ai blogs"],
+      "reference_facts": [
+        "MoE models activate only a subset of parameters per token, reducing FLOPs relative to total parameter count.",
+        "MoE requires full model weights in VRAM, increasing memory bandwidth demands during autoregressive generation."
+      ]
+    },
+    {
+      "id": "case-005",
+      "question": "What mechanisms cause catastrophic forgetting in continual learning for large neural models and what are modern mitigations?",
+      "category": "ai_ml",
+      "expected_dimensions": [
+        {
+          "name": "Weight Overwrite",
+          "match_terms": ["catastrophic forgetting", "weight overwrite", "plasticity", "stability-plasticity"]
+        },
+        {
+          "name": "Rehearsal & Replay",
+          "match_terms": ["replay", "rehearsal", "experience replay", "buffer"]
+        },
+        {
+          "name": "Parameter Isolation",
+          "match_terms": ["lora", "adapter", "parameter isolation", "orthogonal"]
+        }
+      ],
+      "expected_source_types": ["deep learning papers", "continual learning surveys"],
+      "reference_facts": [
+        "Backpropagation optimizes weights for new task objectives, overwriting representations learned for previous tasks.",
+        "Mitigations include episodic rehearsal buffers, regularization techniques, and modular parameter adapters."
+      ]
+    },
+    {
+      "id": "case-006",
+      "question": "How does Direct Preference Optimization (DPO) differ mathematically and operationally from RLHF with PPO?",
+      "category": "ai_ml",
+      "expected_dimensions": [
+        {
+          "name": "Closed-Form Loss",
+          "match_terms": ["closed-form", "implicit reward", "reference model", "loss function"]
+        },
+        {
+          "name": "Reward Model Elimination",
+          "match_terms": ["reward model", "actor-critic", "value network", "two-stage"]
+        },
+        {
+          "name": "Training Stability",
+          "match_terms": ["ppo stability", "hyperparameter", "divergence", "kl penalty"]
+        }
+      ],
+      "expected_source_types": ["ai research papers", "alignment tutorials"],
+      "reference_facts": [
+        "DPO derives an analytical formulation expressing reward directly via the policy's log-ratio against a reference model.",
+        "DPO bypasses explicit reward model fitting and actor-critic reinforcement learning loops."
+      ]
+    },
+    {
+      "id": "case-007",
+      "question": "What are the performance and consistency trade-offs of Raft vs Multi-Paxos in distributed key-value stores?",
+      "category": "software_engineering",
+      "expected_dimensions": [
+        {
+          "name": "Leader Bottleneck",
+          "match_terms": ["leader", "bottleneck", "multi-paxos", "proposer"]
+        },
+        {
+          "name": "Log Compaction & Reconfig",
+          "match_terms": ["log compaction", "snapshot", "membership change", "joint consensus"]
+        },
+        {
+          "name": "Latency & Complexity",
+          "match_terms": ["round trip", "rtt", "latency", "message complexity"]
+        }
+      ],
+      "expected_source_types": ["distributed systems papers", "system design articles"],
+      "reference_facts": [
+        "Raft enforces a strong leader where log entries only flow from the leader to followers.",
+        "Multi-Paxos allows more flexible pipelining but has higher protocol and state-machine complexity."
+      ]
+    },
+    {
+      "id": "case-008",
+      "question": "How does memory safety in Rust differ from garbage collection in Go regarding latency unpredictability and CPU overhead?",
+      "category": "software_engineering",
+      "expected_dimensions": [
+        {
+          "name": "Borrow Checker",
+          "match_terms": ["borrow checker", "ownership", "lifetime", "compile-time"]
+        },
+        {
+          "name": "GC Pause Times",
+          "match_terms": ["garbage collection", "stop-the-world", "gc pause", "tail latency"]
+        },
+        {
+          "name": "Runtime Footprint",
+          "match_terms": ["memory footprint", "runtime overhead", "throughput", "allocation"]
+        }
+      ],
+      "expected_source_types": ["systems programming benchmarks", "language design docs"],
+      "reference_facts": [
+        "Rust enforces memory safety at compile time using ownership and borrowing with zero runtime GC pauses.",
+        "Go uses a concurrent tri-color mark-and-sweep garbage collector optimized for sub-millisecond stop-the-world pauses."
+      ]
+    },
+    {
+      "id": "case-009",
+      "question": "What architectural patterns effectively mitigate cascading failures in distributed microservice architectures?",
+      "category": "software_engineering",
+      "expected_dimensions": [
+        {
+          "name": "Circuit Breakers",
+          "match_terms": ["circuit breaker", "fallback", "fail fast"]
+        },
+        {
+          "name": "Concurrency / Load Shedding",
+          "match_terms": ["load shedding", "rate limit", "concurrency limit", "backpressure"]
+        },
+        {
+          "name": "Bulkhead Isolation",
+          "match_terms": ["bulkhead", "isolation", "thread pool", "partitioning"]
+        }
+      ],
+      "expected_source_types": ["cloud reliability engineering", "microservices architecture books"],
+      "reference_facts": [
+        "Circuit breakers trip when error thresholds are exceeded, preventing unconstrained caller thread exhaustion.",
+        "Load shedding and backpressure drop low-priority traffic before queue delays degrade downstream services."
+      ]
+    },
+    {
+      "id": "case-010",
+      "question": "What are the fundamental physical and architectural limitations of scaling silicon DRAM below 10 nanometers?",
+      "category": "technology",
+      "expected_dimensions": [
+        {
+          "name": "Capacitor Leakage",
+          "match_terms": ["capacitor", "aspect ratio", "dielectric", "leakage"]
+        },
+        {
+          "name": "Rowhammer Vulnerability",
+          "match_terms": ["rowhammer", "cell disturbance", "refresh rate", "interference"]
+        },
+        {
+          "name": "3D DRAM Architectures",
+          "match_terms": ["3d dram", "monolithic", "stacking", "vertical transistor"]
+        }
+      ],
+      "expected_source_types": ["semiconductor physics journals", "memory industry analyses"],
+      "reference_facts": [
+        "Scaling DRAM cell capacitors below 10nm causes excessive leakage current and aspect-ratio manufacturing limits.",
+        "Cell-to-cell capacitive coupling increases disturbance errors, aggravating Rowhammer vulnerabilities."
+      ]
+    },
+    {
+      "id": "case-011",
+      "question": "How do modern solid-state batteries differ from conventional lithium-ion cells regarding energy density, cycle life, and dendrite formation?",
+      "category": "technology",
+      "expected_dimensions": [
+        {
+          "name": "Solid Electrolyte",
+          "match_terms": ["solid electrolyte", "ceramic", "polymer", "flammability"]
+        },
+        {
+          "name": "Lithium Metal Anode",
+          "match_terms": ["lithium metal", "anode", "energy density", "capacity"]
+        },
+        {
+          "name": "Dendrite Suppression",
+          "match_terms": ["dendrite", "short circuit", "interfacial resistance", "pressure"]
+        }
+      ],
+      "expected_source_types": ["materials science journals", "battery technology reviews"],
+      "reference_facts": [
+        "Solid-state batteries replace flammable liquid electrolytes with solid ceramics, sulfides, or polymers.",
+        "Using pure lithium metal anodes drastically increases energy density, but requires preventing dendritic short circuits."
+      ]
+    },
+    {
+      "id": "case-012",
+      "question": "What is the operating principle of extreme ultraviolet (EUV) lithography and why does it require reflective optics?",
+      "category": "technology",
+      "expected_dimensions": [
+        {
+          "name": "13.5nm Absorption",
+          "match_terms": ["13.5", "wavelength", "absorption", "vacuum"]
+        },
+        {
+          "name": "Tin Plasma Source",
+          "match_terms": ["tin", "plasma", "laser-produced", "lpp", "droplet"]
+        },
+        {
+          "name": "Bragg Reflective Mirrors",
+          "match_terms": ["bragg", "reflective optics", "mirror", "molybdenum", "silicon multilayer"]
+        }
+      ],
+      "expected_source_types": ["semiconductor manufacturing journals", "optics technical specs"],
+      "reference_facts": [
+        "13.5 nm EUV radiation is absorbed by almost all matter, including air and optical glass.",
+        "EUV requires reflective molybdenum-silicon multilayer Bragg mirrors in a vacuum chamber."
+      ]
+    },
+    {
+      "id": "case-013",
+      "question": "What were the primary geological and climatological factors that caused the Younger Dryas cooling event?",
+      "category": "general_factual",
+      "expected_dimensions": [
+        {
+          "name": "Meltwater Outburst",
+          "match_terms": ["lake agassiz", "meltwater", "flood", "freshwater"]
+        },
+        {
+          "name": "AMOC Ocean Circulation",
+          "match_terms": ["amoc", "thermohaline", "ocean circulation", "gulf stream"]
+        },
+        {
+          "name": "Impact Hypothesis Debates",
+          "match_terms": ["extraterrestrial impact", "nanodiamonds", "platinum", "comet"]
+        }
+      ],
+      "expected_source_types": ["paleoclimatology papers", "geological survey reports"],
+      "reference_facts": [
+        "A catastrophic release of freshwater from proglacial Lake Agassiz freshened North Atlantic surface waters.",
+        "The influx disrupted the Atlantic Meridional Overturning Circulation (AMOC), causing rapid regional cooling."
+      ]
+    },
+    {
+      "id": "case-014",
+      "question": "What are the leading hypotheses regarding the causes of the Late Bronze Age collapse in the Eastern Mediterranean?",
+      "category": "general_factual",
+      "expected_dimensions": [
+        {
+          "name": "Sea Peoples Invasions",
+          "match_terms": ["sea peoples", "invasion", "migration", "warfare"]
+        },
+        {
+          "name": "Drought and Famine",
+          "match_terms": ["drought", "famine", "pollen analysis", "crop failure"]
+        },
+        {
+          "name": "Systemic Trade Collapse",
+          "match_terms": ["trade network", "tin trade", "systemic collapse", "palatial economy"]
+        }
+      ],
+      "expected_source_types": ["archaeology reviews", "ancient history texts"],
+      "reference_facts": [
+        "The collapse around 1200 BCE affected the Mycenaeans, Hittites, and Levantine coastal cities.",
+        "Modern consensus favors a complex systems collapse combining drought, invasions by the Sea Peoples, and disruptions of vital tin trade routes."
+      ]
+    },
+    {
+      "id": "case-015",
+      "question": "How did the 1987 Montreal Protocol achieve global phase-out of chlorofluorocarbons (CFCs) and what made its enforcement effective?",
+      "category": "general_factual",
+      "expected_dimensions": [
+        {
+          "name": "Ozone Chemistry",
+          "match_terms": ["cfc", "chlorofluorocarbon", "ozone layer", "stratosphere"]
+        },
+        {
+          "name": "Multilateral Fund",
+          "match_terms": ["multilateral fund", "developing countries", "technology transfer", "financial mechanism"]
+        },
+        {
+          "name": "Trade Sanctions",
+          "match_terms": ["trade restriction", "non-party", "compliance", "phase-out schedule"]
+        }
+      ],
+      "expected_source_types": ["environmental policy journals", "unep treaties"],
+      "reference_facts": [
+        "CFCs catalyze ozone destruction in the stratosphere via chlorine free radicals.",
+        "The protocol incorporated trade restrictions against non-signatories and a Multilateral Fund aiding developing nations."
+      ]
+    }
+  ]
+}
