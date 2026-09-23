@@ -1,6 +1,8 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from app.schemas.document import Document
+
 
 class SourceItem(BaseModel):
     title: str = Field(..., description="Title of the source document or webpage")
@@ -30,6 +32,10 @@ class ResearchResponse(BaseModel):
     sources: List[SourceItem] = Field(
         default_factory=list,
         description="List of structured web sources collected for the research question",
+    )
+    documents: List[Document] = Field(
+        default_factory=list,
+        description="List of cleaned and extracted documents from web sources",
     )
     message: Optional[str] = Field(
         default=None,

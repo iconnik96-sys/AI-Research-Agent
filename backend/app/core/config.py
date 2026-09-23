@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     SEARCH_TIMEOUT_SECONDS: float = 10.0
     SEARCH_MAX_RESULTS: int = 5
 
+    # Extraction Service Settings
+    EXTRACTION_TIMEOUT_SECONDS: float = 10.0
+    EXTRACTION_MAX_CHARS: int = 50000
+    EXTRACTION_USER_AGENT: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
