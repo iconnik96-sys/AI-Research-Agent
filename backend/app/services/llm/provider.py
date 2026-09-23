@@ -6,8 +6,9 @@ import httpx
 from app.core.config import settings
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport, ResearchSection
+from app.schemas.retrieval import RetrievedChunk
 from app.services.llm.base import BaseLLMProvider
-from app.services.llm.evidence import prepare_evidence
+from app.services.llm.evidence import prepare_evidence, prepare_evidence_from_chunks
 from app.services.llm.exceptions import (
     LLMConfigError,
     LLMNetworkError,
@@ -70,19 +71,23 @@ class OpenAICompatibleLLMProvider(BaseLLMProvider):
     async def generate_report(
         self,
         question: str,
-        documents: List[Document],
+        documents: Optional[List[Document]] = None,
+        chunks: Optional[List[RetrievedChunk]] = None,
     ) -> ResearchReport:
-        """Synthesize a structured research report from extracted documents."""
-        # If no documents are available, return a deterministic report without calling LLM
-        if not documents:
-            logger.info("No documents provided for question '%s'; returning insufficient evidence report.", question)
+        """Synthesize a structured research report from research question and evidence."""
+        has_chunks = bool(chunks)
+        has_docs = bool(documents)
+
+        # If no evidence is available, return a deterministic report without calling LLM
+        if not has_chunks and not has_docs:
+            logger.info("No evidence provided for question '%s'; returning insufficient evidence report.", question)
             return ResearchReport(
                 title=f"Research Report: {question}",
-                summary="Insufficient evidence found. No usable documents could be retrieved to answer this research question.",
+                summary="Insufficient evidence found. No usable documents or chunks could be retrieved to answer this research question.",
                 sections=[
                     ResearchSection(
                         heading="Evidence Assessment",
-                        content="No source documents were successfully extracted or available for synthesis.",
+                        content="No source documents or relevant evidence chunks were successfully retrieved for synthesis.",
                         citations=[],
                     )
                 ],
@@ -94,10 +99,16 @@ class OpenAICompatibleLLMProvider(BaseLLMProvider):
                 "LLM API key is not configured. Please set LLM_API_KEY in your environment."
             )
 
-        source_refs, evidence_text = prepare_evidence(
-            documents=documents,
-            max_chars_per_doc=self.max_chars_per_doc,
-        )
+        if has_chunks:
+            source_refs, evidence_text = prepare_evidence_from_chunks(
+                chunks=chunks,  # type: ignore[arg-type]
+                max_chars_per_chunk=self.max_chars_per_doc,
+            )
+        else:
+            source_refs, evidence_text = prepare_evidence(
+                documents=documents,  # type: ignore[arg-type]
+                max_chars_per_doc=self.max_chars_per_doc,
+            )
         valid_source_ids = {s.id for s in source_refs}
 
         user_prompt = (

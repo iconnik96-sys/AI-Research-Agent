@@ -1,6 +1,7 @@
 import logging
 import uuid
 from typing import Dict, List, Optional
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import settings
@@ -10,6 +11,7 @@ from app.schemas.chunk import DocumentChunk
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport
 from app.schemas.research import SourceItem
+from app.schemas.retrieval import RetrievedChunk
 from app.services.persistence.base import BaseResearchRepository
 from app.services.persistence.exceptions import (
     DatabaseConfigError,
@@ -209,6 +211,79 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
             )
             raise DatabaseConnectionError(
                 f"Database error persisting document chunks: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def search_similar_chunks(
+        self,
+        query_embedding: List[float],
+        session_id: Optional[str] = None,
+        top_k: int = 5,
+        similarity_threshold: Optional[float] = None,
+    ) -> List[RetrievedChunk]:
+        if not query_embedding:
+            return []
+
+        factory = self._get_factory()
+        try:
+            # Cosine similarity = 1 - cosine distance (<=>)
+            cosine_dist = DocumentChunkModel.embedding.cosine_distance(query_embedding)
+            similarity = (1 - cosine_dist).label("similarity")
+
+            stmt = (
+                select(
+                    DocumentChunkModel.id,
+                    DocumentChunkModel.document_id,
+                    DocumentChunkModel.session_id,
+                    DocumentChunkModel.chunk_index,
+                    DocumentChunkModel.text,
+                    DocumentModel.url,
+                    DocumentModel.title,
+                    similarity,
+                )
+                .join(DocumentModel, DocumentChunkModel.document_id == DocumentModel.id)
+            )
+
+            if session_id:
+                try:
+                    session_uuid = uuid.UUID(session_id)
+                    stmt = stmt.where(DocumentChunkModel.session_id == session_uuid)
+                except (ValueError, TypeError) as exc:
+                    raise DatabaseError(f"Invalid session_id format: {session_id}") from exc
+
+            if similarity_threshold is not None:
+                stmt = stmt.where(similarity >= similarity_threshold)
+
+            stmt = stmt.order_by(similarity.desc()).limit(top_k)
+
+            async with factory() as db:
+                result = await db.execute(stmt)
+                rows = result.all()
+
+            retrieved: List[RetrievedChunk] = []
+            for row in rows:
+                retrieved.append(
+                    RetrievedChunk(
+                        chunk_id=str(row[0]),
+                        document_id=str(row[1]),
+                        session_id=str(row[2]),
+                        chunk_index=row[3],
+                        text=row[4],
+                        url=row[5],
+                        title=row[6],
+                        similarity=float(row[7]),
+                    )
+                )
+            return retrieved
+        except DatabaseError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to search similar chunks (session_id=%s): %s",
+                session_id,
+                _sanitize_error(exc),
+            )
+            raise DatabaseConnectionError(
+                f"Database error during similarity search: {_sanitize_error(exc)}"
             ) from exc
 
     async def complete_session(

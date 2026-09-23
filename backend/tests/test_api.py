@@ -8,6 +8,7 @@ from app.schemas.chunk import DocumentChunk
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport, ResearchSection, SourceReference
 from app.schemas.research import SourceItem
+from app.schemas.retrieval import RetrievalRequest, RetrievalResponse, RetrievedChunk
 from app.services.embedding import (
     BaseEmbeddingProvider,
     EmbeddingConfigError,
@@ -33,6 +34,14 @@ from app.services.persistence import (
     DatabaseConnectionError,
     DatabaseError,
     get_research_repository,
+)
+from app.services.retrieval import (
+    BaseRetriever,
+    RetrievalConfigError,
+    RetrievalDatabaseError,
+    RetrievalEmbeddingError,
+    RetrievalError,
+    get_retriever,
 )
 from app.services.search.base import (
     BaseSearchProvider,
@@ -112,10 +121,21 @@ class MockLLMProvider(BaseLLMProvider):
             ],
         )
         self.error = error
+        self.last_generate_call: dict = {}
 
-    async def generate_report(self, question: str, documents: List[Document]) -> ResearchReport:
+    async def generate_report(
+        self,
+        question: str,
+        documents: Optional[List[Document]] = None,
+        chunks: Optional[List[RetrievedChunk]] = None,
+    ) -> ResearchReport:
         if self.error:
             raise self.error
+        self.last_generate_call = {
+            "question": question,
+            "documents": documents,
+            "chunks": chunks,
+        }
         return self.report
 
 
@@ -143,6 +163,49 @@ class MockEmbeddingProvider(BaseEmbeddingProvider):
         return [0.1] * self._dimensions
 
 
+class MockRetriever(BaseRetriever):
+    """Mock semantic retriever for API integration tests."""
+
+    def __init__(
+        self,
+        results: Optional[List[RetrievedChunk]] = None,
+        error: Optional[Exception] = None,
+    ):
+        self.results = results
+        self.error = error
+        self.last_retrieve_call: dict = {}
+
+    async def retrieve(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        top_k: Optional[int] = None,
+        similarity_threshold: Optional[float] = None,
+    ) -> List[RetrievedChunk]:
+        if self.error:
+            raise self.error
+        self.last_retrieve_call = {
+            "query": query,
+            "session_id": session_id,
+            "top_k": top_k,
+            "similarity_threshold": similarity_threshold,
+        }
+        if self.results is not None:
+            return self.results
+        return [
+            RetrievedChunk(
+                chunk_id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                session_id=session_id or str(uuid.uuid4()),
+                chunk_index=0,
+                text="Mock retrieved chunk text for RAG synthesis.",
+                similarity=0.92,
+                url="https://example.com/source1",
+                title="Mock Source 1",
+            )
+        ]
+
+
 class MockResearchRepository(BaseResearchRepository):
     """Mock repository for API integration tests."""
 
@@ -150,9 +213,11 @@ class MockResearchRepository(BaseResearchRepository):
         self,
         create_error: Optional[Exception] = None,
         save_chunks_error: Optional[Exception] = None,
+        search_similar_chunks_error: Optional[Exception] = None,
     ):
         self.create_error = create_error
         self.save_chunks_error = save_chunks_error
+        self.search_similar_chunks_error = search_similar_chunks_error
         self.created_sessions: List[str] = []
         self.sources_saved: Dict[str, List[SourceItem]] = {}
         self.documents_saved: Dict[str, List[Document]] = {}
@@ -189,6 +254,28 @@ class MockResearchRepository(BaseResearchRepository):
             raise self.save_chunks_error
         self.chunks_saved[session_id] = chunks
 
+    async def search_similar_chunks(
+        self,
+        query_embedding: List[float],
+        session_id: Optional[str] = None,
+        top_k: int = 5,
+        similarity_threshold: Optional[float] = None,
+    ) -> List[RetrievedChunk]:
+        if self.search_similar_chunks_error:
+            raise self.search_similar_chunks_error
+        return [
+            RetrievedChunk(
+                chunk_id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                session_id=session_id or str(uuid.uuid4()),
+                chunk_index=0,
+                text="Repository retrieved chunk text.",
+                similarity=0.94,
+                url="https://example.com/source1",
+                title="Mock Source 1",
+            )
+        ]
+
     async def complete_session(self, session_id: str, report: ResearchReport) -> None:
         self.completed_sessions[session_id] = report
 
@@ -202,6 +289,7 @@ def client():
     app.dependency_overrides[get_search_provider] = lambda: MockSearchProvider()
     app.dependency_overrides[get_webpage_extractor] = lambda: MockWebpageExtractor()
     app.dependency_overrides[get_embedding_provider] = lambda: MockEmbeddingProvider()
+    app.dependency_overrides[get_retriever] = lambda: MockRetriever()
     app.dependency_overrides[get_llm_provider] = lambda: MockLLMProvider()
     app.dependency_overrides[get_research_repository] = lambda: MockResearchRepository()
     with TestClient(app) as test_client:
@@ -219,12 +307,14 @@ def test_research_endpoint_success(client):
     mock_search = MockSearchProvider()
     mock_extractor = MockWebpageExtractor()
     mock_embedding = MockEmbeddingProvider()
+    mock_retriever = MockRetriever()
     mock_llm = MockLLMProvider()
     mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
     app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
@@ -258,6 +348,15 @@ def test_research_endpoint_success(client):
     assert len(chunks[0].embedding) == 1536
     assert chunks[0].document_id is not None
     assert chunks[0].session_id == data["session_id"]
+
+    # Verify semantic retrieval was invoked with session_id
+    assert mock_retriever.last_retrieve_call["session_id"] == data["session_id"]
+    assert mock_retriever.last_retrieve_call["query"] == payload["question"]
+
+    # Verify LLM received ONLY retrieved chunks, not raw documents
+    assert mock_llm.last_generate_call["documents"] is None
+    assert mock_llm.last_generate_call["chunks"] is not None
+    assert len(mock_llm.last_generate_call["chunks"]) == 1
 
     assert data["report"] is not None
     assert data["report"]["title"] == "Mock Research Report"
@@ -550,3 +649,132 @@ def test_research_endpoint_chunk_persistence_error(client):
     assert response.status_code == 500
     assert "Database persistence error" in response.json()["detail"]
     assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_retrieval_embedding_error(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider()
+    mock_retriever = MockRetriever(
+        error=RetrievalEmbeddingError("Embedding service failed during retrieval")
+    )
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+    assert "Embedding service failed during retrieval" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_retrieval_database_error(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider()
+    mock_retriever = MockRetriever(
+        error=RetrievalDatabaseError("Database failure during vector retrieval")
+    )
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 500
+    assert "Database retrieval error" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_retrieve_endpoint_success(client):
+    mock_retriever = MockRetriever()
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+
+    payload = {"query": "breakthroughs in battery chemistry"}
+    response = client.post("/api/research/retrieve", json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["query"] == "breakthroughs in battery chemistry"
+    assert data["top_k"] == 5
+    assert len(data["results"]) == 1
+    assert data["results"][0]["similarity"] == 0.92
+    assert data["results"][0]["url"] == "https://example.com/source1"
+    assert mock_retriever.last_retrieve_call["query"] == "breakthroughs in battery chemistry"
+    assert mock_retriever.last_retrieve_call["session_id"] is None
+
+
+def test_retrieve_endpoint_session_scoped(client):
+    session_id = str(uuid.uuid4())
+    mock_retriever = MockRetriever()
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+
+    payload = {
+        "query": "breakthroughs in battery chemistry",
+        "session_id": session_id,
+        "top_k": 3,
+        "similarity_threshold": 0.8,
+    }
+    response = client.post("/api/research/retrieve", json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["query"] == payload["query"]
+    assert data["top_k"] == 3
+    assert len(data["results"]) == 1
+    assert mock_retriever.last_retrieve_call["session_id"] == session_id
+    assert mock_retriever.last_retrieve_call["top_k"] == 3
+    assert mock_retriever.last_retrieve_call["similarity_threshold"] == 0.8
+
+
+def test_retrieve_endpoint_config_error(client):
+    mock_retriever = MockRetriever(
+        error=RetrievalConfigError("Retrieval configuration error: missing key")
+    )
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+
+    payload = {"query": "breakthroughs in battery chemistry"}
+    response = client.post("/api/research/retrieve", json=payload)
+    assert response.status_code == 503
+    assert "Retrieval configuration error" in response.json()["detail"]
+
+
+def test_retrieve_endpoint_embedding_error(client):
+    mock_retriever = MockRetriever(
+        error=RetrievalEmbeddingError("Embedding upstream failure")
+    )
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+
+    payload = {"query": "breakthroughs in battery chemistry"}
+    response = client.post("/api/research/retrieve", json=payload)
+    assert response.status_code == 502
+    assert "Embedding upstream failure" in response.json()["detail"]
+
+
+def test_retrieve_endpoint_database_error(client):
+    mock_retriever = MockRetriever(
+        error=RetrievalDatabaseError("Database query failed")
+    )
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+
+    payload = {"query": "breakthroughs in battery chemistry"}
+    response = client.post("/api/research/retrieve", json=payload)
+    assert response.status_code == 500
+    assert "Database retrieval error" in response.json()["detail"]
+
+
+def test_retrieve_endpoint_empty_query(client):
+    payload = {"query": "   "}
+    response = client.post("/api/research/retrieve", json=payload)
+    assert response.status_code == 422
+
+

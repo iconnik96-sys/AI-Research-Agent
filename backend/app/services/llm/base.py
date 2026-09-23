@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport
+from app.schemas.retrieval import RetrievedChunk
 
 
 class BaseLLMProvider(ABC):
@@ -12,13 +13,15 @@ class BaseLLMProvider(ABC):
     async def generate_report(
         self,
         question: str,
-        documents: List[Document],
+        documents: Optional[List[Document]] = None,
+        chunks: Optional[List[RetrievedChunk]] = None,
     ) -> ResearchReport:
-        """Synthesize a structured research report from research question and documents.
+        """Synthesize a structured research report from research question and evidence.
 
         Args:
             question: The user's research question.
-            documents: List of cleaned, extracted source documents.
+            documents: Optional list of cleaned, extracted source documents.
+            chunks: Optional list of retrieved relevant document chunks (RAG).
 
         Returns:
             Structured ResearchReport containing title, summary, sections, and source citations.

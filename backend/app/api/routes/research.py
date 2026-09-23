@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.config import settings
 from app.schemas.research import ResearchRequest, ResearchResponse
+from app.schemas.retrieval import RetrievalRequest, RetrievalResponse
 from app.services.chunking import TextChunker, get_text_chunker
 from app.services.embedding import (
     BaseEmbeddingProvider,
@@ -29,6 +30,14 @@ from app.services.persistence import (
     DatabaseError,
     get_research_repository,
 )
+from app.services.retrieval import (
+    BaseRetriever,
+    RetrievalConfigError,
+    RetrievalDatabaseError,
+    RetrievalEmbeddingError,
+    RetrievalError,
+    get_retriever,
+)
 from app.services.search import (
     BaseSearchProvider,
     SearchConfigError,
@@ -43,6 +52,51 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/research", tags=["research"])
 
 
+@router.post("/retrieve", response_model=RetrievalResponse, summary="Retrieve relevant document chunks via vector similarity")
+async def retrieve_chunks(
+    request: RetrievalRequest,
+    retriever: BaseRetriever = Depends(get_retriever),
+) -> RetrievalResponse:
+    """Retrieve top-K similar document chunks using pgvector cosine similarity."""
+    try:
+        results = await retriever.retrieve(
+            query=request.query,
+            session_id=request.session_id,
+            top_k=request.top_k,
+            similarity_threshold=request.similarity_threshold,
+        )
+    except RetrievalConfigError as exc:
+        logger.error("Retrieval configuration error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except RetrievalEmbeddingError as exc:
+        logger.error("Retrieval query embedding error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    except RetrievalDatabaseError as exc:
+        logger.error("Retrieval database error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database retrieval error.",
+        ) from exc
+    except RetrievalError as exc:
+        logger.error("General retrieval error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred during evidence retrieval.",
+        ) from exc
+
+    return RetrievalResponse(
+        query=request.query,
+        results=results,
+        top_k=request.top_k,
+    )
+
+
 @router.post("", response_model=ResearchResponse, summary="Submit a research question")
 async def create_research(
     request: ResearchRequest,
@@ -50,6 +104,7 @@ async def create_research(
     extractor: WebpageExtractor = Depends(get_webpage_extractor),
     embedding_provider: BaseEmbeddingProvider = Depends(get_embedding_provider),
     chunker: TextChunker = Depends(get_text_chunker),
+    retriever: BaseRetriever = Depends(get_retriever),
     llm_provider: BaseLLMProvider = Depends(get_llm_provider),
     repository: BaseResearchRepository = Depends(get_research_repository),
 ) -> ResearchResponse:
@@ -195,11 +250,50 @@ async def create_research(
                     detail="Database persistence error.",
                 ) from exc
 
-    # 7. Synthesize research report via LLM provider
+    # 7. Semantic retrieval: Retrieve top-K relevant chunks scoped to this research session
+    retrieved_chunks = []
+    if documents:
+        try:
+            retrieved_chunks = await retriever.retrieve(
+                query=request.question,
+                session_id=session_id,
+                top_k=settings.RETRIEVAL_TOP_K,
+                similarity_threshold=settings.RETRIEVAL_SIMILARITY_THRESHOLD,
+            )
+        except RetrievalConfigError as exc:
+            logger.error("Retrieval configuration error: %s", exc)
+            await repository.fail_session(session_id, str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except RetrievalEmbeddingError as exc:
+            logger.error("Retrieval query embedding error: %s", exc)
+            await repository.fail_session(session_id, "Retrieval query embedding error")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(exc),
+            ) from exc
+        except RetrievalDatabaseError as exc:
+            logger.error("Retrieval database error: %s", exc)
+            await repository.fail_session(session_id, "Retrieval database error")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Database retrieval error.",
+            ) from exc
+        except RetrievalError as exc:
+            logger.error("General retrieval error: %s", exc)
+            await repository.fail_session(session_id, "Retrieval error")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An error occurred during evidence retrieval.",
+            ) from exc
+
+    # 8. Synthesize research report via LLM provider using ONLY retrieved chunks (RAG)
     try:
         report = await llm_provider.generate_report(
             question=request.question,
-            documents=documents,
+            chunks=retrieved_chunks,
         )
     except LLMConfigError as exc:
         logger.error("LLM configuration error: %s", exc)

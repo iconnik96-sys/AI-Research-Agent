@@ -4,7 +4,8 @@ import httpx
 from unittest.mock import AsyncMock, patch
 
 from app.schemas.document import Document
-from app.services.llm.evidence import prepare_evidence
+from app.schemas.retrieval import RetrievedChunk
+from app.services.llm.evidence import prepare_evidence, prepare_evidence_from_chunks
 from app.services.llm.exceptions import (
     LLMConfigError,
     LLMNetworkError,
@@ -256,3 +257,107 @@ async def test_provider_http_error(sample_documents, status_code):
                 documents=sample_documents,
             )
         assert exc_info.value.status_code == status_code
+
+
+def test_prepare_evidence_from_chunks():
+    chunks = [
+        RetrievedChunk(
+            chunk_id="c1",
+            document_id="d1",
+            session_id="s1",
+            chunk_index=0,
+            text="First excerpt from Doc 1.",
+            similarity=0.92,
+            url="https://example.com/doc1",
+            title="Doc 1",
+        ),
+        RetrievedChunk(
+            chunk_id="c2",
+            document_id="d1",
+            session_id="s1",
+            chunk_index=2,
+            text="Second excerpt from Doc 1.",
+            similarity=0.85,
+            url="https://example.com/doc1",
+            title="Doc 1",
+        ),
+        RetrievedChunk(
+            chunk_id="c3",
+            document_id="d2",
+            session_id="s1",
+            chunk_index=0,
+            text="Excerpt from Doc 2.",
+            similarity=0.88,
+            url="https://example.com/doc2",
+            title="Doc 2",
+        ),
+    ]
+
+    refs, text = prepare_evidence_from_chunks(chunks)
+
+    # Multiple chunks from Doc 1 grouped under S1, Doc 2 under S2
+    assert len(refs) == 2
+    assert refs[0].id == "S1"
+    assert refs[0].url == "https://example.com/doc1"
+    assert refs[1].id == "S2"
+    assert refs[1].url == "https://example.com/doc2"
+
+    assert "First excerpt from Doc 1." in text
+    assert "Second excerpt from Doc 1." in text
+    assert "Excerpt from Doc 2." in text
+    assert "[Source ID: S1]" in text
+    assert "[Source ID: S2]" in text
+
+    # Empty chunks handling
+    empty_refs, empty_text = prepare_evidence_from_chunks([])
+    assert empty_refs == []
+    assert empty_text == ""
+
+
+@pytest.mark.anyio
+async def test_generate_report_from_chunks():
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key")
+    chunks = [
+        RetrievedChunk(
+            chunk_id="c1",
+            document_id="d1",
+            session_id="s1",
+            chunk_index=0,
+            text="Laser inertial confinement achieved fusion ignition.",
+            similarity=0.95,
+            url="https://example.com/fusion",
+            title="Fusion Ignition",
+        )
+    ]
+
+    mock_llm_json = {
+        "title": "Fusion Report via RAG",
+        "summary": "Ignition successfully achieved.",
+        "sections": [
+            {
+                "heading": "Ignition Findings",
+                "content": "Fusion ignition demonstrated experimentally.",
+                "citations": ["S1"],
+            }
+        ],
+    }
+
+    mock_response = httpx.Response(
+        status_code=200,
+        json={"choices": [{"message": {"content": json.dumps(mock_llm_json)}}]},
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        report = await provider.generate_report(
+            question="What is the latest on fusion?",
+            chunks=chunks,
+        )
+
+    assert report.title == "Fusion Report via RAG"
+    assert len(report.sections) == 1
+    assert report.sections[0].citations == ["S1"]
+    assert len(report.sources) == 1
+    assert report.sources[0].id == "S1"
+    assert report.sources[0].url == "https://example.com/fusion"

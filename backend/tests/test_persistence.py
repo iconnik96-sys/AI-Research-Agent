@@ -321,3 +321,73 @@ async def test_save_chunks_db_connection_failure(mock_session_factory, mock_db_s
 
     with pytest.raises(DatabaseConnectionError, match="Database error persisting document chunks"):
         await repo.save_chunks(test_session_id, chunks)
+
+
+@pytest.mark.anyio
+async def test_search_similar_chunks_success(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_chunk_id = uuid.uuid4()
+    test_doc_id = uuid.uuid4()
+    test_session_id = uuid.uuid4()
+
+    mock_row = (
+        test_chunk_id,
+        test_doc_id,
+        test_session_id,
+        0,
+        "Retrieved content",
+        "https://example.com/source",
+        "Source Title",
+        0.912,
+    )
+    mock_result = MagicMock()
+    mock_result.all.return_value = [mock_row]
+    mock_db_session.execute.return_value = mock_result
+
+    results = await repo.search_similar_chunks(
+        query_embedding=[0.1] * 1536,
+        session_id=str(test_session_id),
+        top_k=3,
+        similarity_threshold=0.8,
+    )
+
+    assert len(results) == 1
+    chunk = results[0]
+    assert chunk.chunk_id == str(test_chunk_id)
+    assert chunk.document_id == str(test_doc_id)
+    assert chunk.session_id == str(test_session_id)
+    assert chunk.chunk_index == 0
+    assert chunk.text == "Retrieved content"
+    assert chunk.url == "https://example.com/source"
+    assert chunk.title == "Source Title"
+    assert pytest.approx(chunk.similarity, 0.001) == 0.912
+    mock_db_session.execute.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_search_similar_chunks_empty_embedding(mock_session_factory, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+    results = await repo.search_similar_chunks(query_embedding=[])
+    assert results == []
+
+
+@pytest.mark.anyio
+async def test_search_similar_chunks_invalid_session_uuid(mock_session_factory, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+    with pytest.raises(DatabaseError, match="Invalid session_id format"):
+        await repo.search_similar_chunks(query_embedding=[0.1] * 1536, session_id="not-a-uuid")
+
+
+@pytest.mark.anyio
+async def test_search_similar_chunks_db_error(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    mock_db_session.execute.side_effect = Exception("DB query failed")
+
+    with pytest.raises(DatabaseConnectionError, match="Database error during similarity search"):
+        await repo.search_similar_chunks(query_embedding=[0.1] * 1536)

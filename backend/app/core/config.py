@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 import json
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # Chunking Service Settings
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
+
+    # Retrieval Service Settings
+    RETRIEVAL_TOP_K: int = 5
+    RETRIEVAL_SIMILARITY_THRESHOLD: Optional[float] = None
 
     # Database Settings (Supabase PostgreSQL via asyncpg)
     DATABASE_URL: str = ""

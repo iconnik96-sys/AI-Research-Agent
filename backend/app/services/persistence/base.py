@@ -5,6 +5,7 @@ from app.schemas.chunk import DocumentChunk
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport
 from app.schemas.research import SourceItem
+from app.schemas.retrieval import RetrievedChunk
 
 
 class BaseResearchRepository(ABC):
@@ -69,6 +70,27 @@ class BaseResearchRepository(ABC):
         Args:
             session_id: The session UUID string.
             chunks: List of DocumentChunk objects containing text, embeddings, and document_ids.
+        """
+        pass
+
+    @abstractmethod
+    async def search_similar_chunks(
+        self,
+        query_embedding: List[float],
+        session_id: Optional[str] = None,
+        top_k: int = 5,
+        similarity_threshold: Optional[float] = None,
+    ) -> List[RetrievedChunk]:
+        """Search document chunks using vector cosine similarity.
+
+        Args:
+            query_embedding: Vector embedding of the search query.
+            session_id: Optional session UUID string to filter chunks.
+            top_k: Maximum number of chunks to return.
+            similarity_threshold: Optional minimum cosine similarity threshold.
+
+        Returns:
+            List of RetrievedChunk objects ordered by similarity descending.
         """
         pass
 
