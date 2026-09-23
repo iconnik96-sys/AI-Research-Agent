@@ -26,9 +26,13 @@ def get_engine() -> AsyncEngine:
         _engine = create_async_engine(
             settings.DATABASE_URL,
             pool_size=settings.DATABASE_POOL_SIZE,
-            max_overflow=10,
+            max_overflow=settings.DATABASE_MAX_OVERFLOW,
             pool_pre_ping=True,
-            connect_args={"timeout": settings.DATABASE_TIMEOUT_SECONDS},
+            pool_recycle=settings.DATABASE_POOL_RECYCLE,
+            connect_args={
+                "timeout": settings.DATABASE_TIMEOUT_SECONDS,
+                "statement_cache_size": 0,
+            },
         )
     return _engine
 

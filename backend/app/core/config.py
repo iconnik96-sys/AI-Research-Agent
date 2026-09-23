@@ -73,7 +73,16 @@ class Settings(BaseSettings):
     # Database Settings (Supabase PostgreSQL via asyncpg)
     DATABASE_URL: str = ""
     DATABASE_POOL_SIZE: int = 5
+    DATABASE_MAX_OVERFLOW: int = 10
+    DATABASE_POOL_RECYCLE: int = 300
     DATABASE_TIMEOUT_SECONDS: float = 10.0
+
+    # Rate Limiting Settings (Lightweight in-memory per-worker abuse protection)
+    # Default disabled in dev/testing so automated test suites are not throttled;
+    # enable in production by setting RATE_LIMIT_ENABLED=true in the environment.
+    RATE_LIMIT_ENABLED: bool = False
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -86,6 +95,38 @@ class Settings(BaseSettings):
             except Exception:
                 return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
+
+    def validate_production_settings(self) -> None:
+        """Validate required configuration when running in production environment.
+
+        Raises:
+            ValueError: If required production credentials, database URL, or explicit CORS origins are missing.
+        """
+        if self.ENV.lower() != "production":
+            return
+
+        errors: List[str] = []
+
+        if not self.DATABASE_URL or not self.DATABASE_URL.strip():
+            errors.append("DATABASE_URL must be configured in production.")
+        elif "[YOUR-PASSWORD]" in self.DATABASE_URL or "[YOUR-PROJECT-REF]" in self.DATABASE_URL:
+            errors.append("DATABASE_URL contains placeholder credentials.")
+
+        if not self.TAVILY_API_KEY or not self.TAVILY_API_KEY.strip():
+            errors.append("TAVILY_API_KEY must be configured in production.")
+
+        if not self.LLM_API_KEY or not self.LLM_API_KEY.strip():
+            errors.append("LLM_API_KEY must be configured in production.")
+
+        if not self.EMBEDDING_API_KEY or not self.EMBEDDING_API_KEY.strip():
+            errors.append("EMBEDDING_API_KEY must be configured in production.")
+
+        origins = self.CORS_ORIGINS if isinstance(self.CORS_ORIGINS, list) else [self.CORS_ORIGINS]
+        if "*" in origins:
+            errors.append("Wildcard '*' in CORS_ORIGINS is forbidden in production. Explicit allowed origins must be configured.")
+
+        if errors:
+            raise ValueError(f"Production configuration validation failed: {'; '.join(errors)}")
 
 
 settings = Settings()
