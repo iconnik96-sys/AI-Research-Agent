@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     CORS_ORIGINS: Union[List[str], str] = ["*"]
 
+    # Search Service Settings
+    TAVILY_API_KEY: str = ""
+    SEARCH_PROVIDER: str = "tavily"
+    SEARCH_TIMEOUT_SECONDS: float = 10.0
+    SEARCH_MAX_RESULTS: int = 5
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:

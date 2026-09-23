@@ -1,4 +1,12 @@
+from typing import List, Optional
 from pydantic import BaseModel, Field
+
+
+class SourceItem(BaseModel):
+    title: str = Field(..., description="Title of the source document or webpage")
+    url: str = Field(..., description="Canonical URL of the source")
+    content: str = Field(..., description="Snippet or content summary of the source")
+    score: Optional[float] = Field(default=None, description="Relevance score if provided by search provider")
 
 
 class ResearchRequest(BaseModel):
@@ -16,10 +24,14 @@ class ResearchResponse(BaseModel):
         description="The research question that was submitted",
     )
     status: str = Field(
-        default="received",
-        description="Placeholder status for the research request",
+        default="completed",
+        description="Status of the research request (e.g. 'completed', 'error')",
     )
-    message: str = Field(
-        default="Research request received. Processing pipeline will be implemented in subsequent milestones.",
-        description="Informational status message",
+    sources: List[SourceItem] = Field(
+        default_factory=list,
+        description="List of structured web sources collected for the research question",
+    )
+    message: Optional[str] = Field(
+        default=None,
+        description="Optional informational message or status summary",
     )
