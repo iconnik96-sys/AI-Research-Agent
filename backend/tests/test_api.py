@@ -5,10 +5,27 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas.chunk import DocumentChunk
+from app.schemas.claim import (
+    ClaimVerificationStatus,
+    ExtractedClaim,
+    VerifiedClaim,
+)
 from app.schemas.document import Document
+from app.schemas.evidence import EvidenceItem
 from app.schemas.report import ResearchReport, ResearchSection, SourceReference
 from app.schemas.research import SourceItem
 from app.schemas.retrieval import RetrievalRequest, RetrievalResponse, RetrievedChunk
+from app.services.claim import (
+    BaseClaimExtractor,
+    BaseClaimVerifier,
+    ClaimConfigError,
+    ClaimError,
+    ClaimExtractionError,
+    ClaimResponseError,
+    ClaimVerificationError,
+    get_claim_extractor,
+    get_claim_verifier,
+)
 from app.services.embedding import (
     BaseEmbeddingProvider,
     EmbeddingConfigError,
@@ -173,6 +190,7 @@ class MockLLMProvider(BaseLLMProvider):
         question: str,
         documents: Optional[List[Document]] = None,
         chunks: Optional[List[RetrievedChunk]] = None,
+        claims: Optional[List[VerifiedClaim]] = None,
     ) -> ResearchReport:
         if self.error:
             raise self.error
@@ -180,6 +198,7 @@ class MockLLMProvider(BaseLLMProvider):
             "question": question,
             "documents": documents,
             "chunks": chunks,
+            "claims": claims,
         }
         return self.report
 
@@ -256,6 +275,88 @@ class MockRetriever(BaseRetriever):
         ]
 
 
+class MockClaimExtractor(BaseClaimExtractor):
+    """Mock claim extractor for API integration tests."""
+
+    def __init__(
+        self,
+        claims: Optional[List[ExtractedClaim]] = None,
+        error: Optional[Exception] = None,
+    ):
+        self.claims = claims
+        self.error = error
+        self.extract_calls: List[dict] = []
+
+    async def extract_claims(
+        self,
+        question: str,
+        evidence: List[EvidenceItem],
+    ) -> List[ExtractedClaim]:
+        if self.error:
+            raise self.error
+        self.extract_calls.append({"question": question, "evidence": evidence})
+        if self.claims is not None:
+            return self.claims
+        return [
+            ExtractedClaim(
+                id="C1",
+                claim="Mock factual claim extracted from evidence.",
+                evidence_ids=[evidence[0].evidence_id] if evidence else ["E1"],
+            )
+        ] if evidence else []
+
+
+class MockClaimVerifier(BaseClaimVerifier):
+    """Mock claim verifier for API integration tests."""
+
+    def __init__(
+        self,
+        verified_claims: Optional[List[VerifiedClaim]] = None,
+        error: Optional[Exception] = None,
+    ):
+        self.verified_claims = verified_claims
+        self.error = error
+        self.verify_calls: List[dict] = []
+
+    async def verify_single_claim(
+        self,
+        question: str,
+        claim: ExtractedClaim,
+        evidence_items: List[EvidenceItem],
+    ) -> VerifiedClaim:
+        return VerifiedClaim(
+            id=claim.id,
+            claim=claim.claim,
+            status=ClaimVerificationStatus.SUPPORTED,
+            reason="Mock verified as supported.",
+            evidence_ids=claim.evidence_ids,
+            supporting_evidence_ids=claim.evidence_ids,
+        )
+
+    async def verify_claims(
+        self,
+        question: str,
+        claims: List[ExtractedClaim],
+        evidence: List[EvidenceItem],
+    ) -> List[VerifiedClaim]:
+        if self.error:
+            raise self.error
+        self.verify_calls.append({"question": question, "claims": claims, "evidence": evidence})
+        if self.verified_claims is not None:
+            return self.verified_claims
+        return [
+            VerifiedClaim(
+                id=c.id,
+                claim=c.claim,
+                status=ClaimVerificationStatus.SUPPORTED,
+                reason="Mock verified as supported.",
+                evidence_ids=c.evidence_ids,
+                supporting_evidence_ids=c.evidence_ids,
+            )
+            for c in claims
+        ]
+
+
 class MockResearchRepository(BaseResearchRepository):
     """Mock repository for API integration tests."""
 
@@ -263,15 +364,18 @@ class MockResearchRepository(BaseResearchRepository):
         self,
         create_error: Optional[Exception] = None,
         save_chunks_error: Optional[Exception] = None,
+        save_claims_error: Optional[Exception] = None,
         search_similar_chunks_error: Optional[Exception] = None,
     ):
         self.create_error = create_error
         self.save_chunks_error = save_chunks_error
+        self.save_claims_error = save_claims_error
         self.search_similar_chunks_error = search_similar_chunks_error
         self.created_sessions: List[str] = []
         self.sources_saved: Dict[str, List[SourceItem]] = {}
         self.documents_saved: Dict[str, List[Document]] = {}
         self.chunks_saved: Dict[str, List[DocumentChunk]] = {}
+        self.claims_saved: Dict[str, List[VerifiedClaim]] = {}
         self.completed_sessions: Dict[str, ResearchReport] = {}
         self.failed_sessions: Dict[str, str] = {}
 
@@ -303,6 +407,16 @@ class MockResearchRepository(BaseResearchRepository):
         if self.save_chunks_error:
             raise self.save_chunks_error
         self.chunks_saved[session_id] = chunks
+
+    async def save_claims(
+        self,
+        session_id: str,
+        claims: List[VerifiedClaim],
+        evidence_map: Dict[str, EvidenceItem],
+    ) -> None:
+        if self.save_claims_error:
+            raise self.save_claims_error
+        self.claims_saved[session_id] = claims
 
     async def search_similar_chunks(
         self,
@@ -341,6 +455,8 @@ def client():
     app.dependency_overrides[get_webpage_extractor] = lambda: MockWebpageExtractor()
     app.dependency_overrides[get_embedding_provider] = lambda: MockEmbeddingProvider()
     app.dependency_overrides[get_retriever] = lambda: MockRetriever()
+    app.dependency_overrides[get_claim_extractor] = lambda: MockClaimExtractor()
+    app.dependency_overrides[get_claim_verifier] = lambda: MockClaimVerifier()
     app.dependency_overrides[get_llm_provider] = lambda: MockLLMProvider()
     app.dependency_overrides[get_research_repository] = lambda: MockResearchRepository()
     with TestClient(app) as test_client:
@@ -1011,6 +1127,129 @@ def test_research_endpoint_partial_search_failure_tolerance(client):
     assert len(data["sources"]) == 1
     assert data["sources"][0]["title"] == "Successful Source From Query 1"
     assert len(mock_search.search_calls) == 2
+
+
+def test_research_endpoint_success_includes_claims(client):
+    """Task 9: Verify research response includes verified claims and persists them."""
+    mock_extractor = MockClaimExtractor()
+    mock_verifier = MockClaimVerifier()
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_claim_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_claim_verifier] = lambda: mock_verifier
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What are the latest breakthroughs in fusion energy?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["status"] == "completed"
+    assert "claims" in data
+    assert len(data["claims"]) == 1
+    assert data["claims"][0]["id"] == "C1"
+    assert data["claims"][0]["status"] == "SUPPORTED"
+    assert data["claims"][0]["supporting_evidence_ids"] == ["E1"]
+
+    # Verify repository saved claims
+    session_id = data["session_id"]
+    assert session_id in mock_repo.claims_saved
+    assert len(mock_repo.claims_saved[session_id]) == 1
+
+
+def test_verify_claims_endpoint_success(client):
+    """Task 9: Standalone POST /api/research/verify endpoint tests independent verification."""
+    payload = {
+        "question": "What is fusion?",
+        "claims": [
+            {
+                "id": "C1",
+                "claim": "Fusion ignition demonstrated experimentally.",
+                "evidence_ids": ["E1"],
+            }
+        ],
+        "evidence": [
+            {
+                "evidence_id": "E1",
+                "chunk_id": str(uuid.uuid4()),
+                "document_id": str(uuid.uuid4()),
+                "session_id": str(uuid.uuid4()),
+                "url": "https://example.com/fusion",
+                "title": "Fusion Title",
+                "text": "Ignition was achieved at LLNL in 2022.",
+                "similarity": 0.95,
+            }
+        ],
+    }
+
+    response = client.post("/api/research/verify", json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["question"] == "What is fusion?"
+    assert len(data["verified_claims"]) == 1
+    assert data["verified_claims"][0]["id"] == "C1"
+    assert data["verified_claims"][0]["status"] == "SUPPORTED"
+
+
+def test_verify_claims_endpoint_errors(client):
+    """Task 9: Test error handling on POST /api/research/verify."""
+    # Config error -> 503
+    app.dependency_overrides[get_claim_verifier] = lambda: MockClaimVerifier(
+        error=ClaimConfigError("Missing verifier credentials")
+    )
+    payload = {
+        "question": "What is fusion?",
+        "claims": [{"id": "C1", "claim": "Statement", "evidence_ids": ["E1"]}],
+        "evidence": [
+            {
+                "evidence_id": "E1",
+                "chunk_id": str(uuid.uuid4()),
+                "document_id": str(uuid.uuid4()),
+                "session_id": str(uuid.uuid4()),
+                "url": "https://example.com",
+                "title": "Title",
+                "text": "Text",
+                "similarity": 0.9,
+            }
+        ],
+    }
+    resp = client.post("/api/research/verify", json=payload)
+    assert resp.status_code == 503
+
+    # Verification provider error -> 502
+    app.dependency_overrides[get_claim_verifier] = lambda: MockClaimVerifier(
+        error=ClaimVerificationError("Verifier upstream failure")
+    )
+    resp = client.post("/api/research/verify", json=payload)
+    assert resp.status_code == 502
+
+
+def test_research_endpoint_claim_extraction_error(client):
+    """Task 9: Claim extraction failure raises 502 Bad Gateway."""
+    mock_extractor = MockClaimExtractor(
+        error=ClaimExtractionError("Extractor upstream failure")
+    )
+    app.dependency_overrides[get_claim_extractor] = lambda: mock_extractor
+
+    payload = {"question": "Fusion status?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+    assert "Claim extraction error" in response.json()["detail"]
+
+
+def test_research_endpoint_claim_persistence_error(client):
+    """Task 9: Claim persistence failure raises 500 Internal Server Error."""
+    mock_repo = MockResearchRepository(
+        save_claims_error=DatabaseError("Failed to persist claims")
+    )
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "Fusion status?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 500
+    assert "Database persistence error" in response.json()["detail"]
+
 
 
 

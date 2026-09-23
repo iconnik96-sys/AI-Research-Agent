@@ -5,10 +5,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import settings
-from app.db.models import DocumentChunkModel, DocumentModel, ResearchSessionModel, SourceModel
+from app.db.models import (
+    ClaimEvidenceModel,
+    ClaimModel,
+    DocumentChunkModel,
+    DocumentModel,
+    ResearchSessionModel,
+    SourceModel,
+)
 from app.db.session import get_session_factory
 from app.schemas.chunk import DocumentChunk
+from app.schemas.claim import VerifiedClaim
 from app.schemas.document import Document
+from app.schemas.evidence import EvidenceItem
 from app.schemas.report import ResearchReport
 from app.schemas.research import SourceItem
 from app.schemas.retrieval import RetrievedChunk
@@ -284,6 +293,61 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
             )
             raise DatabaseConnectionError(
                 f"Database error during similarity search: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def save_claims(
+        self,
+        session_id: str,
+        claims: List[VerifiedClaim],
+        evidence_map: Dict[str, EvidenceItem],
+    ) -> None:
+        if not claims:
+            return
+
+        factory = self._get_factory()
+        try:
+            session_uuid = uuid.UUID(session_id)
+            claim_models: List[ClaimModel] = []
+            evidence_models: List[ClaimEvidenceModel] = []
+
+            for c in claims:
+                claim_uuid = uuid.uuid4()
+                status_val = c.status.value if hasattr(c.status, "value") else str(c.status)
+                claim_models.append(
+                    ClaimModel(
+                        id=claim_uuid,
+                        session_id=session_uuid,
+                        claim_identifier=c.id,
+                        claim=c.claim,
+                        status=status_val,
+                        reason=c.reason,
+                    )
+                )
+
+                supporting_set = set(c.supporting_evidence_ids)
+                # Link each cited evidence ID
+                for eid in c.evidence_ids:
+                    if eid in evidence_map:
+                        ev = evidence_map[eid]
+                        chunk_uuid = uuid.UUID(ev.chunk_id)
+                        evidence_models.append(
+                            ClaimEvidenceModel(
+                                id=uuid.uuid4(),
+                                claim_id=claim_uuid,
+                                chunk_id=chunk_uuid,
+                                evidence_identifier=eid,
+                                is_supporting=(eid in supporting_set),
+                            )
+                        )
+
+            async with factory() as db:
+                db.add_all(claim_models)
+                db.add_all(evidence_models)
+                await db.commit()
+        except Exception as exc:
+            logger.error("Failed to persist claims for session %s: %s", session_id, _sanitize_error(exc))
+            raise DatabaseConnectionError(
+                f"Database error persisting claims: {_sanitize_error(exc)}"
             ) from exc
 
     async def complete_session(

@@ -3,6 +3,7 @@ import pytest
 import httpx
 from unittest.mock import AsyncMock, patch
 
+from app.schemas.claim import ClaimVerificationStatus, VerifiedClaim
 from app.schemas.document import Document
 from app.schemas.retrieval import RetrievedChunk
 from app.services.llm.evidence import prepare_evidence, prepare_evidence_from_chunks
@@ -361,3 +362,74 @@ async def test_generate_report_from_chunks():
     assert len(report.sources) == 1
     assert report.sources[0].id == "S1"
     assert report.sources[0].url == "https://example.com/fusion"
+
+
+@pytest.mark.anyio
+async def test_generate_report_with_grounding_claims():
+    """Adjustment 4: Test that verified claims and grounding rules are integrated into prompt."""
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key")
+    chunks = [
+        RetrievedChunk(
+            chunk_id="c1",
+            document_id="d1",
+            session_id="s1",
+            chunk_index=0,
+            text="Laser inertial confinement achieved fusion ignition.",
+            similarity=0.95,
+            url="https://example.com/fusion",
+            title="Fusion Ignition",
+        )
+    ]
+    claims = [
+        VerifiedClaim(
+            id="C1",
+            claim="Fusion ignition demonstrated experimentally.",
+            status=ClaimVerificationStatus.SUPPORTED,
+            reason="Confirmed by experimental results.",
+            evidence_ids=["E1"],
+            supporting_evidence_ids=["E1"],
+        ),
+        VerifiedClaim(
+            id="C2",
+            claim="Commercial fusion is operational worldwide.",
+            status=ClaimVerificationStatus.UNSUPPORTED,
+            reason="Directly contradicted by current reactor status.",
+            evidence_ids=["E1"],
+            supporting_evidence_ids=[],
+        ),
+    ]
+
+    mock_llm_json = {
+        "title": "Grounded Fusion Report",
+        "summary": "Ignition was achieved, though commercial deployment remains unsolved.",
+        "sections": [
+            {
+                "heading": "Ignition Findings",
+                "content": "Experimental ignition was achieved in 2022.",
+                "citations": ["S1"],
+            }
+        ],
+    }
+
+    mock_response = httpx.Response(
+        status_code=200,
+        json={"choices": [{"message": {"content": json.dumps(mock_llm_json)}}]},
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        report = await provider.generate_report(
+            question="What is the latest on fusion?",
+            chunks=chunks,
+            claims=claims,
+        )
+
+        assert report.title == "Grounded Fusion Report"
+        # Verify that prompt sent to LLM included the claims and grounding guidance
+        called_payload = mock_post.call_args.kwargs["json"]
+        user_message = called_payload["messages"][1]["content"]
+        assert "Verified Claims & Grounding Guidance:" in user_message
+        assert "[C1] (SUPPORTED): \"Fusion ignition demonstrated experimentally.\"" in user_message
+        assert "[C2] (UNSUPPORTED): \"Commercial fusion is operational worldwide.\"" in user_message
+

@@ -5,7 +5,9 @@ import pytest
 from app.core.config import settings
 from app.db.models import ResearchSessionModel
 from app.schemas.chunk import DocumentChunk
+from app.schemas.claim import ClaimVerificationStatus, VerifiedClaim
 from app.schemas.document import Document
+from app.schemas.evidence import EvidenceItem
 from app.schemas.report import ResearchReport, ResearchSection, SourceReference
 from app.schemas.research import SourceItem
 from app.services.persistence.exceptions import (
@@ -391,3 +393,68 @@ async def test_search_similar_chunks_db_error(mock_session_factory, mock_db_sess
 
     with pytest.raises(DatabaseConnectionError, match="Database error during similarity search"):
         await repo.search_similar_chunks(query_embedding=[0.1] * 1536)
+
+
+@pytest.mark.anyio
+async def test_save_claims_success(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    session_id = str(uuid.uuid4())
+    chunk_id = str(uuid.uuid4())
+    evidence_map = {
+        "E1": EvidenceItem(
+            evidence_id="E1",
+            chunk_id=chunk_id,
+            document_id=str(uuid.uuid4()),
+            session_id=session_id,
+            url="https://example.com",
+            title="Fusion Title",
+            text="Fusion text",
+            similarity=0.9,
+        )
+    }
+    claims = [
+        VerifiedClaim(
+            id="C1",
+            claim="Fusion succeeded",
+            status=ClaimVerificationStatus.SUPPORTED,
+            reason="Confirmed by E1",
+            evidence_ids=["E1"],
+            supporting_evidence_ids=["E1"],
+        )
+    ]
+
+    await repo.save_claims(session_id=session_id, claims=claims, evidence_map=evidence_map)
+    assert mock_db_session.add_all.call_count == 2
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_save_claims_empty(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    await repo.save_claims(session_id=str(uuid.uuid4()), claims=[], evidence_map={})
+    mock_db_session.add_all.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_save_claims_db_error(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    mock_db_session.commit.side_effect = Exception("DB write failed")
+    claims = [
+        VerifiedClaim(
+            id="C1",
+            claim="Fusion succeeded",
+            status=ClaimVerificationStatus.SUPPORTED,
+            reason="Confirmed",
+            evidence_ids=["E1"],
+            supporting_evidence_ids=[],
+        )
+    ]
+    with pytest.raises(DatabaseConnectionError, match="Database error persisting claims"):
+        await repo.save_claims(session_id=str(uuid.uuid4()), claims=claims, evidence_map={})
+

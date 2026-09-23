@@ -4,10 +4,28 @@ from typing import Dict, List
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.config import settings
+from app.schemas.claim import (
+    ExtractedClaim,
+    VerifiedClaim,
+    VerifyClaimsRequest,
+    VerifyClaimsResponse,
+)
+from app.schemas.evidence import EvidenceItem
 from app.schemas.planner import ResearchPlan
 from app.schemas.research import ResearchRequest, ResearchResponse, SourceItem
 from app.schemas.retrieval import RetrievalRequest, RetrievalResponse, RetrievedChunk
 from app.services.chunking import TextChunker, get_text_chunker
+from app.services.claim import (
+    BaseClaimExtractor,
+    BaseClaimVerifier,
+    ClaimConfigError,
+    ClaimError,
+    ClaimExtractionError,
+    ClaimResponseError,
+    ClaimVerificationError,
+    get_claim_extractor,
+    get_claim_verifier,
+)
 from app.services.embedding import (
     BaseEmbeddingProvider,
     EmbeddingConfigError,
@@ -143,6 +161,43 @@ async def plan_research(
         ) from exc
 
 
+@router.post("/verify", response_model=VerifyClaimsResponse, summary="Independently verify factual claims against evidence")
+async def verify_claims_endpoint(
+    request: VerifyClaimsRequest,
+    verifier: BaseClaimVerifier = Depends(get_claim_verifier),
+) -> VerifyClaimsResponse:
+    """Independently verify candidate factual claims against provided evidence items."""
+    try:
+        verified = await verifier.verify_claims(
+            question=request.question,
+            claims=request.claims,
+            evidence=request.evidence,
+        )
+    except ClaimConfigError as exc:
+        logger.error("Claim verification configuration error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except ClaimVerificationError as exc:
+        logger.error("Claim verification error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Claim verification error: {str(exc)}",
+        ) from exc
+    except ClaimError as exc:
+        logger.error("General claim verification error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while verifying claims.",
+        ) from exc
+
+    return VerifyClaimsResponse(
+        question=request.question,
+        verified_claims=verified,
+    )
+
+
 @router.post("", response_model=ResearchResponse, summary="Submit a research question")
 async def create_research(
     request: ResearchRequest,
@@ -152,6 +207,8 @@ async def create_research(
     embedding_provider: BaseEmbeddingProvider = Depends(get_embedding_provider),
     chunker: TextChunker = Depends(get_text_chunker),
     retriever: BaseRetriever = Depends(get_retriever),
+    claim_extractor: BaseClaimExtractor = Depends(get_claim_extractor),
+    claim_verifier: BaseClaimVerifier = Depends(get_claim_verifier),
     llm_provider: BaseLLMProvider = Depends(get_llm_provider),
     repository: BaseResearchRepository = Depends(get_research_repository),
 ) -> ResearchResponse:
@@ -427,11 +484,103 @@ async def create_research(
         )
         retrieved_chunks = sorted_chunks[:settings.RETRIEVAL_MAX_TOTAL_CHUNKS]
 
-    # 9. Synthesize research report via LLM provider using ONLY retrieved chunks (RAG)
+    # 9. Evidence Management & Claim Extraction & Verification
+    evidence_items: List[EvidenceItem] = []
+    evidence_map: Dict[str, EvidenceItem] = {}
+    for index, chunk in enumerate(retrieved_chunks, start=1):
+        eid = f"E{index}"
+        item = EvidenceItem(
+            evidence_id=eid,
+            chunk_id=chunk.chunk_id,
+            document_id=chunk.document_id,
+            session_id=chunk.session_id or session_id,
+            url=chunk.url,
+            title=chunk.title,
+            text=chunk.text,
+            similarity=chunk.similarity,
+        )
+        evidence_items.append(item)
+        evidence_map[eid] = item
+
+    verified_claims: List[VerifiedClaim] = []
+    if evidence_items:
+        try:
+            extracted_claims = await claim_extractor.extract_claims(
+                question=request.question,
+                evidence=evidence_items,
+            )
+        except ClaimConfigError as exc:
+            logger.error("Claim extraction configuration error: %s", exc)
+            await repository.fail_session(session_id, str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except (ClaimExtractionError, ClaimResponseError) as exc:
+            logger.error("Claim extraction error: %s", exc)
+            await repository.fail_session(session_id, str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Claim extraction error: {str(exc)}",
+            ) from exc
+        except ClaimError as exc:
+            logger.error("General claim extraction error: %s", exc)
+            await repository.fail_session(session_id, "Claim extraction error")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An error occurred while extracting factual claims.",
+            ) from exc
+
+        if extracted_claims:
+            try:
+                verified_claims = await claim_verifier.verify_claims(
+                    question=request.question,
+                    claims=extracted_claims,
+                    evidence=evidence_items,
+                )
+            except ClaimConfigError as exc:
+                logger.error("Claim verification configuration error: %s", exc)
+                await repository.fail_session(session_id, str(exc))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=str(exc),
+                ) from exc
+            except ClaimVerificationError as exc:
+                logger.error("Claim verification error: %s", exc)
+                await repository.fail_session(session_id, str(exc))
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Claim verification error: {str(exc)}",
+                ) from exc
+            except ClaimError as exc:
+                logger.error("General claim verification error: %s", exc)
+                await repository.fail_session(session_id, "Claim verification error")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="An error occurred while verifying factual claims.",
+                ) from exc
+
+            # Persist verified claims and claim-evidence links
+            try:
+                await repository.save_claims(
+                    session_id=session_id,
+                    claims=verified_claims,
+                    evidence_map=evidence_map,
+                )
+            except DatabaseError as exc:
+                logger.error("Database error persisting claims: %s", exc)
+                await repository.fail_session(session_id, "Failed to persist claims")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Database persistence error.",
+                ) from exc
+
+    # 10. Synthesize grounded research report via LLM provider using ONLY retrieved chunks and verified claims
     try:
         report = await llm_provider.generate_report(
             question=request.question,
             chunks=retrieved_chunks,
+            claims=verified_claims,
         )
     except LLMConfigError as exc:
         logger.error("LLM configuration error: %s", exc)
@@ -469,7 +618,7 @@ async def create_research(
             detail="An error occurred while generating the research report.",
         ) from exc
 
-    # 10. Complete session with report JSONB
+    # 11. Complete session with report JSONB
     try:
         await repository.complete_session(session_id=session_id, report=report)
     except DatabaseError as exc:
@@ -486,6 +635,7 @@ async def create_research(
         plan=plan,
         sources=sources,
         documents=documents,
+        claims=verified_claims,
         report=report,
-        message=f"Planned {len(plan.sub_questions)} sub-questions, retrieved {len(sources)} source(s), and synthesized report.",
+        message=f"Planned {len(plan.sub_questions)} sub-questions, retrieved {len(sources)} source(s), verified {len(verified_claims)} claim(s), and synthesized report.",
     )

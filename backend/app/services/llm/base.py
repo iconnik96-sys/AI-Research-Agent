@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
+from app.schemas.claim import VerifiedClaim
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport
 from app.schemas.retrieval import RetrievedChunk
@@ -15,6 +16,7 @@ class BaseLLMProvider(ABC):
         question: str,
         documents: Optional[List[Document]] = None,
         chunks: Optional[List[RetrievedChunk]] = None,
+        claims: Optional[List[VerifiedClaim]] = None,
     ) -> ResearchReport:
         """Synthesize a structured research report from research question and evidence.
 

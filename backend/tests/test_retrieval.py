@@ -63,6 +63,9 @@ class FakeResearchRepository(BaseResearchRepository):
     async def save_chunks(self, session_id: str, chunks: List[DocumentChunk]) -> None:
         pass
 
+    async def save_claims(self, session_id: str, claims: list, evidence_map: dict) -> None:
+        pass
+
     async def complete_session(self, session_id: str, report: ResearchReport) -> None:
         pass
 

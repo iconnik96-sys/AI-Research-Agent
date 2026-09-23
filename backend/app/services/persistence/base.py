@@ -2,7 +2,9 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
 from app.schemas.chunk import DocumentChunk
+from app.schemas.claim import VerifiedClaim
 from app.schemas.document import Document
+from app.schemas.evidence import EvidenceItem
 from app.schemas.report import ResearchReport
 from app.schemas.research import SourceItem
 from app.schemas.retrieval import RetrievedChunk
@@ -91,6 +93,22 @@ class BaseResearchRepository(ABC):
 
         Returns:
             List of RetrievedChunk objects ordered by similarity descending.
+        """
+        pass
+
+    @abstractmethod
+    async def save_claims(
+        self,
+        session_id: str,
+        claims: List[VerifiedClaim],
+        evidence_map: Dict[str, EvidenceItem],
+    ) -> None:
+        """Persist verified claims and their evidence relationships.
+
+        Args:
+            session_id: The session UUID string.
+            claims: List of VerifiedClaim objects.
+            evidence_map: Mapping of evidence_id (e.g. 'E1') to EvidenceItem.
         """
         pass
 

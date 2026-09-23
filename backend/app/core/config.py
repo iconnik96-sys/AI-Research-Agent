@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     RETRIEVAL_SIMILARITY_THRESHOLD: Optional[float] = None
     RETRIEVAL_MAX_TOTAL_CHUNKS: int = 15
 
+    # Claim & Verification Settings
+    CLAIM_MAX_COUNT: int = 15
+    CLAIM_EXTRACTION_TIMEOUT_SECONDS: float = 30.0
+    CLAIM_VERIFICATION_TIMEOUT_SECONDS: float = 30.0
+    CLAIM_VERIFICATION_CONCURRENCY: int = 5
+
     # Database Settings (Supabase PostgreSQL via asyncpg)
     DATABASE_URL: str = ""
     DATABASE_POOL_SIZE: int = 5

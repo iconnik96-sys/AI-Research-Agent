@@ -1,6 +1,7 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator
 
+from app.schemas.claim import VerifiedClaim
 from app.schemas.document import Document
 from app.schemas.planner import ResearchPlan
 from app.schemas.report import ResearchReport
@@ -53,6 +54,10 @@ class ResearchResponse(BaseModel):
     documents: List[Document] = Field(
         default_factory=list,
         description="List of cleaned and extracted documents from web sources",
+    )
+    claims: List[VerifiedClaim] = Field(
+        default_factory=list,
+        description="List of verified factual claims derived from retrieved evidence",
     )
     report: Optional[ResearchReport] = Field(
         default=None,

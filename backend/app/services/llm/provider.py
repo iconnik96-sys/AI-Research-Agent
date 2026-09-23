@@ -4,6 +4,7 @@ from typing import List, Optional
 import httpx
 
 from app.core.config import settings
+from app.schemas.claim import VerifiedClaim
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport, ResearchSection
 from app.schemas.retrieval import RetrievedChunk
@@ -21,15 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You are an expert AI research analyst.
-Your task is to synthesize a rigorous, factual research report answering the user's research question using ONLY the supplied sources.
+Your task is to synthesize a rigorous, factual research report answering the user's research question using ONLY the supplied sources and grounding guidance.
 
 Rules:
 1. Base your answer strictly on the provided evidence. Do NOT invent facts or extrapolate beyond the text.
 2. Do NOT invent sources or citations. Every citation must be one of the exact Source IDs provided (e.g. S1, S2).
-3. If the evidence is insufficient, contradictory, or inconclusive, explicitly state that limitation.
-4. Structure your response into clear thematic sections.
-5. In each section, include the list of Source IDs (e.g. ["S1", "S2"]) that support the statements in that section.
-6. Return your output strictly as a JSON object matching this schema:
+3. Grounding Rules for Verified Claims:
+   - Claims with status SUPPORTED may be presented as supported factual content.
+   - Claims with status PARTIALLY_SUPPORTED may be presented with appropriate qualification.
+   - Claims with status INSUFFICIENT_EVIDENCE must communicate uncertainty when relevant.
+   - Claims with status UNSUPPORTED must NOT be presented as established facts.
+   - Do NOT force every claim into the report; synthesize naturally based on relevance.
+4. If the evidence is insufficient, contradictory, or inconclusive, explicitly state that limitation.
+5. Structure your response into clear thematic sections.
+6. In each section, include the list of Source IDs (e.g. ["S1", "S2"]) that support the statements in that section.
+7. Return your output strictly as a JSON object matching this schema:
 {
   "title": "Comprehensive title for the research report",
   "summary": "High-level executive summary of findings and evidence",
@@ -73,6 +80,7 @@ class OpenAICompatibleLLMProvider(BaseLLMProvider):
         question: str,
         documents: Optional[List[Document]] = None,
         chunks: Optional[List[RetrievedChunk]] = None,
+        claims: Optional[List[VerifiedClaim]] = None,
     ) -> ResearchReport:
         """Synthesize a structured research report from research question and evidence."""
         has_chunks = bool(chunks)
@@ -111,9 +119,22 @@ class OpenAICompatibleLLMProvider(BaseLLMProvider):
             )
         valid_source_ids = {s.id for s in source_refs}
 
+        claims_text = ""
+        if claims:
+            claims_lines = ["\nVerified Claims & Grounding Guidance:"]
+            for c in claims:
+                status_str = c.status.value if hasattr(c.status, "value") else str(c.status)
+                claims_lines.append(
+                    f"- [{c.id}] ({status_str}): \"{c.claim}\"\n"
+                    f"  Status: {status_str} | Reason: {c.reason}\n"
+                    f"  Supporting Evidence: {c.supporting_evidence_ids if c.supporting_evidence_ids else 'None'}"
+                )
+            claims_text = "\n".join(claims_lines) + "\n"
+
         user_prompt = (
             f"Research Question: {question}\n\n"
-            f"Supplied Sources:\n{evidence_text}\n\n"
+            f"Supplied Sources:\n{evidence_text}\n"
+            f"{claims_text}\n"
             "Please generate the structured research report according to instructions."
         )
 

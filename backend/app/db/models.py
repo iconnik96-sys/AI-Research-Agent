@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -58,6 +58,11 @@ class ResearchSessionModel(Base):
     )
     chunks: Mapped[List["DocumentChunkModel"]] = relationship(
         "DocumentChunkModel",
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+    claims: Mapped[List["ClaimModel"]] = relationship(
+        "ClaimModel",
         back_populates="session",
         cascade="all, delete-orphan",
     )
@@ -188,4 +193,86 @@ class DocumentChunkModel(Base):
     document: Mapped["DocumentModel"] = relationship(
         "DocumentModel",
         back_populates="chunks",
+    )
+    claim_evidence_links: Mapped[List["ClaimEvidenceModel"]] = relationship(
+        "ClaimEvidenceModel",
+        back_populates="chunk",
+        cascade="all, delete-orphan",
+    )
+
+
+class ClaimModel(Base):
+    """Database model for an extracted research claim and its verification status."""
+
+    __tablename__ = "claims"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    claim_identifier: Mapped[str] = mapped_column(String(50), nullable=False)
+    claim: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    session: Mapped["ResearchSessionModel"] = relationship(
+        "ResearchSessionModel",
+        back_populates="claims",
+    )
+    evidence_links: Mapped[List["ClaimEvidenceModel"]] = relationship(
+        "ClaimEvidenceModel",
+        back_populates="claim",
+        cascade="all, delete-orphan",
+    )
+
+
+class ClaimEvidenceModel(Base):
+    """Junction model connecting a claim to an evidence chunk with verification result."""
+
+    __tablename__ = "claim_evidence"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("claims.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_chunks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    evidence_identifier: Mapped[str] = mapped_column(String(50), nullable=False)
+    is_supporting: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    claim: Mapped["ClaimModel"] = relationship(
+        "ClaimModel",
+        back_populates="evidence_links",
+    )
+    chunk: Mapped["DocumentChunkModel"] = relationship(
+        "DocumentChunkModel",
+        back_populates="claim_evidence_links",
     )
