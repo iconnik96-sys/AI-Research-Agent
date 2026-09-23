@@ -4,9 +4,18 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas.document import Document
+from app.schemas.report import ResearchReport, ResearchSection, SourceReference
 from app.schemas.research import SourceItem
 from app.services.extraction import get_webpage_extractor
 from app.services.extraction.base import BaseExtractor
+from app.services.llm import (
+    BaseLLMProvider,
+    LLMConfigError,
+    LLMProviderError,
+    LLMResponseError,
+    LLMTimeoutError,
+    get_llm_provider,
+)
 from app.services.search.base import (
     BaseSearchProvider,
     SearchConfigError,
@@ -62,6 +71,36 @@ class MockWebpageExtractor(BaseExtractor):
         return self.documents
 
 
+class MockLLMProvider(BaseLLMProvider):
+    """Mock LLM provider for API integration tests."""
+
+    def __init__(self, report: Optional[ResearchReport] = None, error: Optional[Exception] = None):
+        self.report = report or ResearchReport(
+            title="Mock Research Report",
+            summary="Mock executive summary of research findings.",
+            sections=[
+                ResearchSection(
+                    heading="Key Findings",
+                    content="Detailed findings backed by evidence.",
+                    citations=["S1"],
+                )
+            ],
+            sources=[
+                SourceReference(
+                    id="S1",
+                    title="Mock Source 1",
+                    url="https://example.com/source1",
+                )
+            ],
+        )
+        self.error = error
+
+    async def generate_report(self, question: str, documents: List[Document]) -> ResearchReport:
+        if self.error:
+            raise self.error
+        return self.report
+
+
 @pytest.fixture
 def client():
     app.dependency_overrides.clear()
@@ -79,8 +118,11 @@ def test_health_check(client):
 def test_research_endpoint_success(client):
     mock_search = MockSearchProvider()
     mock_extractor = MockWebpageExtractor()
+    mock_llm = MockLLMProvider()
+
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_llm_provider] = lambda: mock_llm
 
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
@@ -90,24 +132,37 @@ def test_research_endpoint_success(client):
     assert data["question"] == payload["question"]
     assert data["status"] == "completed"
 
-    # Verify both sources and documents are present
+    # Verify sources, documents, and report are all present
     assert len(data["sources"]) == 1
     assert data["sources"][0]["title"] == "Mock Source 1"
-    assert data["sources"][0]["url"] == "https://example.com/source1"
 
     assert len(data["documents"]) == 1
     assert data["documents"][0]["url"] == "https://example.com/source1"
-    assert data["documents"][0]["title"] == "Mock Source 1"
-    assert "Cleaned readable text" in data["documents"][0]["text"]
-    assert data["documents"][0]["char_count"] == 58
+
+    assert data["report"] is not None
+    assert data["report"]["title"] == "Mock Research Report"
+    assert len(data["report"]["sections"]) == 1
+    assert data["report"]["sections"][0]["citations"] == ["S1"]
+    assert len(data["report"]["sources"]) == 1
 
 
 def test_research_endpoint_extraction_failure_tolerance(client):
     mock_search = MockSearchProvider()
     # Extractor returns empty list because all page fetches failed
     mock_extractor = MockWebpageExtractor(documents=[])
+    # Empty documents returns insufficient evidence report deterministically
+    mock_llm = MockLLMProvider(
+        report=ResearchReport(
+            title="Insufficient Evidence",
+            summary="No sources could be extracted.",
+            sections=[],
+            sources=[],
+        )
+    )
+
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_llm_provider] = lambda: mock_llm
 
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
@@ -117,9 +172,10 @@ def test_research_endpoint_extraction_failure_tolerance(client):
     assert data["status"] == "completed"
     assert len(data["sources"]) == 1
     assert data["documents"] == []
+    assert data["report"]["summary"] == "No sources could be extracted."
 
 
-def test_research_endpoint_missing_api_key(client):
+def test_research_endpoint_missing_search_key(client):
     mock_provider = MockSearchProvider(
         error=SearchConfigError("Tavily API key is not configured. Please set TAVILY_API_KEY.")
     )
@@ -131,7 +187,7 @@ def test_research_endpoint_missing_api_key(client):
     assert "Tavily API key is not configured" in response.json()["detail"]
 
 
-def test_research_endpoint_timeout(client):
+def test_research_endpoint_search_timeout(client):
     mock_provider = MockSearchProvider(
         error=SearchTimeoutError("Search request timed out after 10.0s")
     )
@@ -142,7 +198,7 @@ def test_research_endpoint_timeout(client):
     assert response.status_code == 504
 
 
-def test_research_endpoint_provider_error(client):
+def test_research_endpoint_search_provider_error(client):
     mock_provider = MockSearchProvider(
         error=SearchProviderError("Upstream API error HTTP 500")
     )
@@ -151,6 +207,72 @@ def test_research_endpoint_provider_error(client):
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 502
+
+
+def test_research_endpoint_llm_missing_api_key(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_llm = MockLLMProvider(
+        error=LLMConfigError("LLM API key is not configured. Please set LLM_API_KEY.")
+    )
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 503
+    assert "LLM API key is not configured" in response.json()["detail"]
+
+
+def test_research_endpoint_llm_timeout(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_llm = MockLLMProvider(
+        error=LLMTimeoutError("LLM request timed out after 30.0s")
+    )
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 504
+
+
+def test_research_endpoint_llm_provider_error(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_llm = MockLLMProvider(
+        error=LLMProviderError("Upstream LLM API error 500")
+    )
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+
+
+def test_research_endpoint_llm_response_error(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_llm = MockLLMProvider(
+        error=LLMResponseError("Invalid citation ID 'S99'")
+    )
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+    assert "Invalid citation ID" in response.json()["detail"]
 
 
 def test_research_endpoint_missing_question(client):

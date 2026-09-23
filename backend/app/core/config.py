@@ -32,6 +32,13 @@ class Settings(BaseSettings):
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 
+    # LLM Service Settings
+    LLM_API_KEY: str = ""
+    LLM_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_MODEL: str = "gpt-4o-mini"
+    LLM_TIMEOUT_SECONDS: float = 30.0
+    LLM_MAX_CHARS_PER_DOC: int = 4000
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:

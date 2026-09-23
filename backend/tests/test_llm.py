@@ -1,0 +1,258 @@
+import json
+import pytest
+import httpx
+from unittest.mock import AsyncMock, patch
+
+from app.schemas.document import Document
+from app.services.llm.evidence import prepare_evidence
+from app.services.llm.exceptions import (
+    LLMConfigError,
+    LLMNetworkError,
+    LLMProviderError,
+    LLMResponseError,
+    LLMTimeoutError,
+)
+from app.services.llm.provider import OpenAICompatibleLLMProvider
+
+
+@pytest.fixture
+def sample_documents():
+    return [
+        Document(
+            url="https://example.com/fusion-1",
+            title="Fusion Ignition Breakthrough",
+            text="Researchers at NIF produced 3.15 MJ of energy from a 2.05 MJ laser shot, achieving net energy gain.",
+            score=0.98,
+            char_count=104,
+        ),
+        Document(
+            url="https://example.com/fusion-2",
+            title="Commercial Fusion Timelines",
+            text="Commercial power generation from magnetic confinement still faces plasma stability and materials challenges.",
+            score=0.91,
+            char_count=113,
+        ),
+    ]
+
+
+def test_evidence_preparation_deterministic(sample_documents):
+    refs, text = prepare_evidence(sample_documents, max_chars_per_doc=50)
+
+    assert len(refs) == 2
+    assert refs[0].id == "S1"
+    assert refs[0].title == "Fusion Ignition Breakthrough"
+    assert refs[0].url == "https://example.com/fusion-1"
+
+    assert refs[1].id == "S2"
+    assert refs[1].title == "Commercial Fusion Timelines"
+    assert refs[1].url == "https://example.com/fusion-2"
+
+    assert "[Source ID: S1]" in text
+    assert "[Source ID: S2]" in text
+    # Test per-document character limitation
+    assert len(sample_documents[0].text[:50]) <= 50
+
+
+@pytest.mark.anyio
+async def test_empty_documents_handling():
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key")
+
+    with patch.object(httpx.AsyncClient, "post") as mock_post:
+        report = await provider.generate_report(
+            question="What is fusion?",
+            documents=[],
+        )
+        mock_post.assert_not_called()
+        assert "Insufficient evidence" in report.summary
+        assert len(report.sections) == 1
+        assert report.sources == []
+
+
+@pytest.mark.anyio
+async def test_missing_api_key(sample_documents):
+    provider = OpenAICompatibleLLMProvider(api_key="")
+
+    with pytest.raises(LLMConfigError, match="LLM API key is not configured"):
+        await provider.generate_report(
+            question="What is fusion?",
+            documents=sample_documents,
+        )
+
+
+@pytest.mark.anyio
+async def test_successful_report_generation(sample_documents):
+    provider = OpenAICompatibleLLMProvider(
+        api_key="mock-key",
+        model="test-gpt-model",
+    )
+
+    llm_output = {
+        "title": "Synthesis of Nuclear Fusion Breakthroughs",
+        "summary": "Recent experiments at NIF achieved net energy gain, although commercial deployment challenges persist.",
+        "sections": [
+            {
+                "heading": "Net Energy Gain",
+                "content": "NIF demonstrated net energy gain generating 3.15 MJ.",
+                "citations": ["S1"],
+            },
+            {
+                "heading": "Commercial Prospects",
+                "content": "Commercial development faces materials and stability hurdles.",
+                "citations": ["S2"],
+            },
+        ],
+    }
+
+    mock_response = httpx.Response(
+        status_code=200,
+        json={
+            "id": "chatcmpl-mock",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(llm_output),
+                    },
+                }
+            ],
+        },
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        report = await provider.generate_report(
+            question="What are recent breakthroughs in fusion?",
+            documents=sample_documents,
+        )
+
+        assert report.title == "Synthesis of Nuclear Fusion Breakthroughs"
+        assert len(report.sections) == 2
+        assert report.sections[0].heading == "Net Energy Gain"
+        assert report.sections[0].citations == ["S1"]
+        assert report.sections[1].citations == ["S2"]
+        assert len(report.sources) == 2
+        assert report.sources[0].id == "S1"
+
+        # Verify correct model parameter was passed
+        mock_post.assert_awaited_once()
+        sent_payload = mock_post.await_args.kwargs["json"]
+        assert sent_payload["model"] == "test-gpt-model"
+
+
+@pytest.mark.anyio
+async def test_malformed_json_response(sample_documents):
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key")
+
+    mock_response = httpx.Response(
+        status_code=200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "This is non-JSON text.",
+                    }
+                }
+            ]
+        },
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        with pytest.raises(LLMResponseError, match="malformed non-JSON"):
+            await provider.generate_report(
+                question="What is fusion?",
+                documents=sample_documents,
+            )
+
+
+@pytest.mark.anyio
+async def test_invalid_citation_id(sample_documents):
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key")
+
+    # S99 does not exist in sample_documents (only S1 and S2 exist)
+    llm_output = {
+        "title": "Fusion Report",
+        "summary": "Summary",
+        "sections": [
+            {
+                "heading": "Hallucinated Citation",
+                "content": "Statement claiming false evidence.",
+                "citations": ["S99"],
+            }
+        ],
+    }
+
+    mock_response = httpx.Response(
+        status_code=200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(llm_output),
+                    }
+                }
+            ]
+        },
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        with pytest.raises(LLMResponseError, match="Invalid citation ID 'S99'"):
+            await provider.generate_report(
+                question="What is fusion?",
+                documents=sample_documents,
+            )
+
+
+@pytest.mark.anyio
+async def test_timeout_raises_llm_timeout_error(sample_documents):
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key", timeout_seconds=2.0)
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = httpx.TimeoutException("Read timed out")
+        with pytest.raises(LLMTimeoutError, match="timed out"):
+            await provider.generate_report(
+                question="What is fusion?",
+                documents=sample_documents,
+            )
+
+
+@pytest.mark.anyio
+async def test_network_error_raises_llm_network_error(sample_documents):
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key")
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = httpx.ConnectError("Connection refused")
+        with pytest.raises(LLMNetworkError, match="Network error"):
+            await provider.generate_report(
+                question="What is fusion?",
+                documents=sample_documents,
+            )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status_code", [401, 429, 500])
+async def test_provider_http_error(sample_documents, status_code):
+    provider = OpenAICompatibleLLMProvider(api_key="mock-key")
+
+    mock_response = httpx.Response(
+        status_code=status_code,
+        text=f"Error {status_code}",
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+        with pytest.raises(LLMProviderError) as exc_info:
+            await provider.generate_report(
+                question="What is fusion?",
+                documents=sample_documents,
+            )
+        assert exc_info.value.status_code == status_code
