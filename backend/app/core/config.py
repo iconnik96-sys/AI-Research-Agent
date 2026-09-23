@@ -1,12 +1,17 @@
+from pathlib import Path
 from typing import List, Union
 import json
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Resolve project root: AI-Research-Agent/
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+ROOT_ENV_FILE = PROJECT_ROOT / ".env"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(str(ROOT_ENV_FILE), ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -38,6 +43,22 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gpt-4o-mini"
     LLM_TIMEOUT_SECONDS: float = 30.0
     LLM_MAX_CHARS_PER_DOC: int = 4000
+
+    # Embedding Service Settings
+    EMBEDDING_API_KEY: str = ""
+    EMBEDDING_BASE_URL: str = "https://api.openai.com/v1"
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    EMBEDDING_DIMENSIONS: int = 1536
+    EMBEDDING_TIMEOUT_SECONDS: float = 30.0
+
+    # Chunking Service Settings
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 200
+
+    # Database Settings (Supabase PostgreSQL via asyncpg)
+    DATABASE_URL: str = ""
+    DATABASE_POOL_SIZE: int = 5
+    DATABASE_TIMEOUT_SECONDS: float = 10.0
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

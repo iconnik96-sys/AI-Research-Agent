@@ -1,0 +1,195 @@
+import logging
+import uuid
+from typing import Dict, List, Optional
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.core.config import settings
+from app.db.models import DocumentModel, ResearchSessionModel, SourceModel
+from app.db.session import get_session_factory
+from app.schemas.document import Document
+from app.schemas.report import ResearchReport
+from app.schemas.research import SourceItem
+from app.services.persistence.base import BaseResearchRepository
+from app.services.persistence.exceptions import (
+    DatabaseConfigError,
+    DatabaseConnectionError,
+    DatabaseError,
+    SessionNotFoundError,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """Strip any credentials or connection strings from error messages."""
+    msg = str(exc)
+    # Mask any potential password/connection uri patterns
+    if "@" in msg and "://" in msg:
+        return "Database connection failure (sensitive details masked)"
+    return msg
+
+
+class SQLAlchemyResearchRepository(BaseResearchRepository):
+    """SQLAlchemy implementation of research repository with asyncpg."""
+
+    def __init__(
+        self,
+        session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
+    ):
+        if not settings.DATABASE_URL or not settings.DATABASE_URL.strip():
+            raise DatabaseConfigError(
+                "DATABASE_URL is not configured. Please set DATABASE_URL environment variable."
+            )
+        self._session_factory = session_factory
+
+    def _get_factory(self) -> async_sessionmaker[AsyncSession]:
+        if self._session_factory is not None:
+            return self._session_factory
+        try:
+            return get_session_factory()
+        except Exception as exc:
+            raise DatabaseConnectionError(
+                f"Failed to initialize database engine: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def create_session(self, question: str) -> str:
+        factory = self._get_factory()
+        try:
+            session_id = uuid.uuid4()
+            async with factory() as db:
+                session_model = ResearchSessionModel(
+                    id=session_id,
+                    question=question,
+                    status="pending",
+                )
+                db.add(session_model)
+                await db.commit()
+                return str(session_id)
+        except Exception as exc:
+            logger.error("Failed to create research session: %s", _sanitize_error(exc))
+            raise DatabaseConnectionError(
+                f"Database error creating session: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def save_sources(
+        self,
+        session_id: str,
+        sources: List[SourceItem],
+    ) -> Dict[str, str]:
+        if not sources:
+            return {}
+
+        factory = self._get_factory()
+        try:
+            session_uuid = uuid.UUID(session_id)
+            url_to_id: Dict[str, str] = {}
+            source_models: List[SourceModel] = []
+
+            for s in sources:
+                src_id = uuid.uuid4()
+                url_to_id[s.url] = str(src_id)
+                source_models.append(
+                    SourceModel(
+                        id=src_id,
+                        session_id=session_uuid,
+                        title=s.title,
+                        url=s.url,
+                        content=s.content,
+                        score=s.score,
+                    )
+                )
+
+            async with factory() as db:
+                db.add_all(source_models)
+                await db.commit()
+
+            return url_to_id
+        except Exception as exc:
+            logger.error("Failed to persist sources for session %s: %s", session_id, _sanitize_error(exc))
+            raise DatabaseConnectionError(
+                f"Database error persisting sources: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def save_documents(
+        self,
+        session_id: str,
+        documents: List[Document],
+        source_id_map: Optional[Dict[str, str]] = None,
+    ) -> None:
+        if not documents:
+            return
+
+        factory = self._get_factory()
+        try:
+            session_uuid = uuid.UUID(session_id)
+            doc_models: List[DocumentModel] = []
+
+            for doc in documents:
+                source_uuid = None
+                if source_id_map and doc.url in source_id_map:
+                    try:
+                        source_uuid = uuid.UUID(source_id_map[doc.url])
+                    except (ValueError, TypeError):
+                        source_uuid = None
+
+                doc_models.append(
+                    DocumentModel(
+                        id=uuid.uuid4(),
+                        session_id=session_uuid,
+                        source_id=source_uuid,
+                        url=doc.url,
+                        title=doc.title,
+                        text=doc.text,
+                        char_count=doc.char_count,
+                        score=doc.score,
+                    )
+                )
+
+            async with factory() as db:
+                db.add_all(doc_models)
+                await db.commit()
+        except Exception as exc:
+            logger.error("Failed to persist documents for session %s: %s", session_id, _sanitize_error(exc))
+            raise DatabaseConnectionError(
+                f"Database error persisting documents: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def complete_session(
+        self,
+        session_id: str,
+        report: ResearchReport,
+    ) -> None:
+        factory = self._get_factory()
+        try:
+            session_uuid = uuid.UUID(session_id)
+            async with factory() as db:
+                session_model = await db.get(ResearchSessionModel, session_uuid)
+                if not session_model:
+                    raise SessionNotFoundError(f"Research session {session_id} not found.")
+
+                session_model.status = "completed"
+                session_model.report = report.model_dump()
+                await db.commit()
+        except SessionNotFoundError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to complete session %s: %s", session_id, _sanitize_error(exc))
+            raise DatabaseConnectionError(
+                f"Database error completing session: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def fail_session(
+        self,
+        session_id: str,
+        error_message: str,
+    ) -> None:
+        factory = self._get_factory()
+        try:
+            session_uuid = uuid.UUID(session_id)
+            async with factory() as db:
+                session_model = await db.get(ResearchSessionModel, session_uuid)
+                if session_model:
+                    session_model.status = "failed"
+                    await db.commit()
+        except Exception as exc:
+            logger.warning("Could not record failure status for session %s: %s", session_id, _sanitize_error(exc))

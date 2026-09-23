@@ -1,0 +1,210 @@
+import uuid
+from unittest.mock import AsyncMock, MagicMock, patch
+import pytest
+
+from app.core.config import settings
+from app.db.models import ResearchSessionModel
+from app.schemas.document import Document
+from app.schemas.report import ResearchReport, ResearchSection, SourceReference
+from app.schemas.research import SourceItem
+from app.services.persistence.exceptions import (
+    DatabaseConfigError,
+    DatabaseConnectionError,
+    SessionNotFoundError,
+)
+from app.services.persistence.repository import (
+    SQLAlchemyResearchRepository,
+    _sanitize_error,
+)
+
+
+def test_sanitize_error():
+    sensitive_msg = "Error connecting to postgresql+asyncpg://postgres:SuperSecretPassword123@db.supabase.co:5432/postgres"
+    sanitized = _sanitize_error(Exception(sensitive_msg))
+    assert "SuperSecretPassword123" not in sanitized
+    assert "sensitive details masked" in sanitized
+
+    regular_msg = "Table not found"
+    assert _sanitize_error(Exception(regular_msg)) == regular_msg
+
+
+def test_missing_database_url_raises_config_error(monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "")
+    with pytest.raises(DatabaseConfigError, match="DATABASE_URL is not configured"):
+        SQLAlchemyResearchRepository()
+
+
+@pytest.fixture
+def mock_db_session():
+    mock_session = AsyncMock()
+    mock_session.add = MagicMock()
+    mock_session.add_all = MagicMock()
+    mock_session.commit = AsyncMock()
+    mock_session.refresh = AsyncMock()
+    mock_session.get = AsyncMock()
+    return mock_session
+
+
+@pytest.fixture
+def mock_session_factory(mock_db_session):
+    factory = MagicMock()
+    # Support `async with factory() as db:`
+    factory.return_value.__aenter__.return_value = mock_db_session
+    factory.return_value.__aexit__.return_value = None
+    return factory
+
+
+@pytest.mark.anyio
+async def test_create_session(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    session_id = await repo.create_session("What are the latest fusion breakthroughs?")
+
+    assert session_id is not None
+    # Validate it's a valid UUID
+    parsed_uuid = uuid.UUID(session_id)
+    assert str(parsed_uuid) == session_id
+
+    mock_db_session.add.assert_called_once()
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_save_sources(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    sources = [
+        SourceItem(
+            title="Fusion Article",
+            url="https://example.com/fusion",
+            content="Snippet",
+            score=0.95,
+        ),
+        SourceItem(
+            title="Second Article",
+            url="https://example.com/second",
+            content="Snippet 2",
+            score=0.85,
+        ),
+    ]
+
+    url_to_id = await repo.save_sources(test_session_id, sources)
+
+    assert len(url_to_id) == 2
+    assert "https://example.com/fusion" in url_to_id
+    assert "https://example.com/second" in url_to_id
+
+    mock_db_session.add_all.assert_called_once()
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_save_documents(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    source_uuid = str(uuid.uuid4())
+    source_map = {"https://example.com/fusion": source_uuid}
+
+    documents = [
+        Document(
+            url="https://example.com/fusion",
+            title="Fusion Article",
+            text="Detailed scientific text about net energy gain.",
+            score=0.95,
+            char_count=45,
+        )
+    ]
+
+    await repo.save_documents(test_session_id, documents, source_id_map=source_map)
+
+    mock_db_session.add_all.assert_called_once()
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_complete_session_success(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    existing_session = ResearchSessionModel(
+        id=uuid.UUID(test_session_id),
+        question="What is fusion?",
+        status="pending",
+    )
+    mock_db_session.get.return_value = existing_session
+
+    report = ResearchReport(
+        title="Fusion Report",
+        summary="Net energy gain confirmed.",
+        sections=[
+            ResearchSection(
+                heading="Results",
+                content="3.15 MJ output.",
+                citations=["S1"],
+            )
+        ],
+        sources=[
+            SourceReference(
+                id="S1",
+                title="Source 1",
+                url="https://example.com/s1",
+            )
+        ],
+    )
+
+    await repo.complete_session(test_session_id, report)
+
+    assert existing_session.status == "completed"
+    assert existing_session.report is not None
+    assert existing_session.report["title"] == "Fusion Report"
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_complete_session_not_found(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    mock_db_session.get.return_value = None
+
+    report = ResearchReport(title="T", summary="S", sections=[], sources=[])
+
+    with pytest.raises(SessionNotFoundError, match="not found"):
+        await repo.complete_session(test_session_id, report)
+
+
+@pytest.mark.anyio
+async def test_fail_session(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    existing_session = ResearchSessionModel(
+        id=uuid.UUID(test_session_id),
+        question="What is fusion?",
+        status="pending",
+    )
+    mock_db_session.get.return_value = existing_session
+
+    await repo.fail_session(test_session_id, "Tavily rate limit exceeded")
+
+    assert existing_session.status == "failed"
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_database_connection_failure(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    mock_db_session.commit.side_effect = Exception("Connection refused by peer")
+
+    with pytest.raises(DatabaseConnectionError, match="Database error creating session"):
+        await repo.create_session("Question")

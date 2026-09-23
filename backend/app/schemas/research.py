@@ -22,6 +22,10 @@ class ResearchRequest(BaseModel):
 
 
 class ResearchResponse(BaseModel):
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Persisted research session UUID string",
+    )
     question: str = Field(
         ...,
         description="The research question that was submitted",

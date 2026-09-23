@@ -1,4 +1,5 @@
-from typing import List, Optional
+import uuid
+from typing import Dict, List, Optional
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,6 +16,12 @@ from app.services.llm import (
     LLMResponseError,
     LLMTimeoutError,
     get_llm_provider,
+)
+from app.services.persistence import (
+    BaseResearchRepository,
+    DatabaseConfigError,
+    DatabaseConnectionError,
+    get_research_repository,
 )
 from app.services.search.base import (
     BaseSearchProvider,
@@ -101,9 +108,50 @@ class MockLLMProvider(BaseLLMProvider):
         return self.report
 
 
+class MockResearchRepository(BaseResearchRepository):
+    """Mock repository for API integration tests."""
+
+    def __init__(self, create_error: Optional[Exception] = None):
+        self.create_error = create_error
+        self.created_sessions: List[str] = []
+        self.sources_saved: Dict[str, List[SourceItem]] = {}
+        self.documents_saved: Dict[str, List[Document]] = {}
+        self.completed_sessions: Dict[str, ResearchReport] = {}
+        self.failed_sessions: Dict[str, str] = {}
+
+    async def create_session(self, question: str) -> str:
+        if self.create_error:
+            raise self.create_error
+        session_id = str(uuid.uuid4())
+        self.created_sessions.append(session_id)
+        return session_id
+
+    async def save_sources(self, session_id: str, sources: List[SourceItem]) -> Dict[str, str]:
+        self.sources_saved[session_id] = sources
+        return {s.url: str(uuid.uuid4()) for s in sources}
+
+    async def save_documents(
+        self,
+        session_id: str,
+        documents: List[Document],
+        source_id_map: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.documents_saved[session_id] = documents
+
+    async def complete_session(self, session_id: str, report: ResearchReport) -> None:
+        self.completed_sessions[session_id] = report
+
+    async def fail_session(self, session_id: str, error_message: str) -> None:
+        self.failed_sessions[session_id] = error_message
+
+
 @pytest.fixture
 def client():
     app.dependency_overrides.clear()
+    app.dependency_overrides[get_search_provider] = lambda: MockSearchProvider()
+    app.dependency_overrides[get_webpage_extractor] = lambda: MockWebpageExtractor()
+    app.dependency_overrides[get_llm_provider] = lambda: MockLLMProvider()
+    app.dependency_overrides[get_research_repository] = lambda: MockResearchRepository()
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -119,18 +167,27 @@ def test_research_endpoint_success(client):
     mock_search = MockSearchProvider()
     mock_extractor = MockWebpageExtractor()
     mock_llm = MockLLMProvider()
+    mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 200
 
     data = response.json()
+    assert data["session_id"] is not None
+    assert uuid.UUID(data["session_id"])  # verify valid UUID
     assert data["question"] == payload["question"]
     assert data["status"] == "completed"
+
+    # Verify repository calls
+    assert data["session_id"] in mock_repo.created_sessions
+    assert data["session_id"] in mock_repo.completed_sessions
+    assert len(mock_repo.sources_saved[data["session_id"]]) == 1
 
     # Verify sources, documents, and report are all present
     assert len(data["sources"]) == 1
@@ -148,9 +205,7 @@ def test_research_endpoint_success(client):
 
 def test_research_endpoint_extraction_failure_tolerance(client):
     mock_search = MockSearchProvider()
-    # Extractor returns empty list because all page fetches failed
     mock_extractor = MockWebpageExtractor(documents=[])
-    # Empty documents returns insufficient evidence report deterministically
     mock_llm = MockLLMProvider(
         report=ResearchReport(
             title="Insufficient Evidence",
@@ -159,54 +214,93 @@ def test_research_endpoint_extraction_failure_tolerance(client):
             sources=[],
         )
     )
+    mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 200
 
     data = response.json()
+    assert data["session_id"] is not None
     assert data["status"] == "completed"
     assert len(data["sources"]) == 1
     assert data["documents"] == []
     assert data["report"]["summary"] == "No sources could be extracted."
+    assert data["session_id"] in mock_repo.completed_sessions
+
+
+def test_research_endpoint_database_missing_config(client):
+    mock_repo = MockResearchRepository(
+        create_error=DatabaseConfigError("DATABASE_URL is not configured.")
+    )
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 503
+    assert "DATABASE_URL is not configured" in response.json()["detail"]
+
+
+def test_research_endpoint_database_connection_failure(client):
+    mock_repo = MockResearchRepository(
+        create_error=DatabaseConnectionError("Database error creating session: connection failure")
+    )
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 500
+    assert "Database persistence error" in response.json()["detail"]
 
 
 def test_research_endpoint_missing_search_key(client):
-    mock_provider = MockSearchProvider(
+    mock_search = MockSearchProvider(
         error=SearchConfigError("Tavily API key is not configured. Please set TAVILY_API_KEY.")
     )
-    app.dependency_overrides[get_search_provider] = lambda: mock_provider
+    mock_repo = MockResearchRepository()
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 503
     assert "Tavily API key is not configured" in response.json()["detail"]
 
+    # Verify session marked as failed
+    assert len(mock_repo.failed_sessions) == 1
+
 
 def test_research_endpoint_search_timeout(client):
-    mock_provider = MockSearchProvider(
+    mock_search = MockSearchProvider(
         error=SearchTimeoutError("Search request timed out after 10.0s")
     )
-    app.dependency_overrides[get_search_provider] = lambda: mock_provider
+    mock_repo = MockResearchRepository()
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 504
+    assert len(mock_repo.failed_sessions) == 1
 
 
 def test_research_endpoint_search_provider_error(client):
-    mock_provider = MockSearchProvider(
+    mock_search = MockSearchProvider(
         error=SearchProviderError("Upstream API error HTTP 500")
     )
-    app.dependency_overrides[get_search_provider] = lambda: mock_provider
+    mock_repo = MockResearchRepository()
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What are the latest breakthroughs in fusion energy?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 502
+    assert len(mock_repo.failed_sessions) == 1
 
 
 def test_research_endpoint_llm_missing_api_key(client):
@@ -215,15 +309,18 @@ def test_research_endpoint_llm_missing_api_key(client):
     mock_llm = MockLLMProvider(
         error=LLMConfigError("LLM API key is not configured. Please set LLM_API_KEY.")
     )
+    mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What is quantum computing?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 503
     assert "LLM API key is not configured" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
 
 
 def test_research_endpoint_llm_timeout(client):
@@ -232,14 +329,17 @@ def test_research_endpoint_llm_timeout(client):
     mock_llm = MockLLMProvider(
         error=LLMTimeoutError("LLM request timed out after 30.0s")
     )
+    mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What is quantum computing?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 504
+    assert len(mock_repo.failed_sessions) == 1
 
 
 def test_research_endpoint_llm_provider_error(client):
@@ -248,14 +348,17 @@ def test_research_endpoint_llm_provider_error(client):
     mock_llm = MockLLMProvider(
         error=LLMProviderError("Upstream LLM API error 500")
     )
+    mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What is quantum computing?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 502
+    assert len(mock_repo.failed_sessions) == 1
 
 
 def test_research_endpoint_llm_response_error(client):
@@ -264,15 +367,18 @@ def test_research_endpoint_llm_response_error(client):
     mock_llm = MockLLMProvider(
         error=LLMResponseError("Invalid citation ID 'S99'")
     )
+    mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
     payload = {"question": "What is quantum computing?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 502
     assert "Invalid citation ID" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
 
 
 def test_research_endpoint_missing_question(client):
