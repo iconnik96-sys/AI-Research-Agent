@@ -55,9 +55,14 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
 
+    # Planner Service Settings
+    PLANNER_MAX_SUB_QUESTIONS: int = 5
+    PLANNER_TIMEOUT_SECONDS: float = 30.0
+
     # Retrieval Service Settings
     RETRIEVAL_TOP_K: int = 5
     RETRIEVAL_SIMILARITY_THRESHOLD: Optional[float] = None
+    RETRIEVAL_MAX_TOTAL_CHUNKS: int = 15
 
     # Database Settings (Supabase PostgreSQL via asyncpg)
     DATABASE_URL: str = ""

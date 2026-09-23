@@ -1,9 +1,12 @@
+import asyncio
 import logging
+from typing import Dict, List
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.config import settings
-from app.schemas.research import ResearchRequest, ResearchResponse
-from app.schemas.retrieval import RetrievalRequest, RetrievalResponse
+from app.schemas.planner import ResearchPlan
+from app.schemas.research import ResearchRequest, ResearchResponse, SourceItem
+from app.schemas.retrieval import RetrievalRequest, RetrievalResponse, RetrievedChunk
 from app.services.chunking import TextChunker, get_text_chunker
 from app.services.embedding import (
     BaseEmbeddingProvider,
@@ -29,6 +32,15 @@ from app.services.persistence import (
     DatabaseConfigError,
     DatabaseError,
     get_research_repository,
+)
+from app.services.planner import (
+    BaseResearchPlanner,
+    PlannerConfigError,
+    PlannerError,
+    PlannerNetworkError,
+    PlannerResponseError,
+    PlannerTimeoutError,
+    get_research_planner,
 )
 from app.services.retrieval import (
     BaseRetriever,
@@ -97,9 +109,44 @@ async def retrieve_chunks(
     )
 
 
+@router.post("/plan", response_model=ResearchPlan, summary="Generate structured research plan")
+async def plan_research(
+    request: ResearchRequest,
+    planner: BaseResearchPlanner = Depends(get_research_planner),
+) -> ResearchPlan:
+    """Decompose a research question into structured sub-questions and search queries."""
+    try:
+        return await planner.create_plan(request.question)
+    except PlannerConfigError as exc:
+        logger.error("Planner configuration error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except PlannerTimeoutError as exc:
+        logger.error("Planner timeout error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="The research planning request timed out. Please try again.",
+        ) from exc
+    except (PlannerResponseError, PlannerNetworkError) as exc:
+        logger.error("Planner response/network error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Research planner error: {str(exc)}",
+        ) from exc
+    except PlannerError as exc:
+        logger.error("General planner error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while generating the research plan.",
+        ) from exc
+
+
 @router.post("", response_model=ResearchResponse, summary="Submit a research question")
 async def create_research(
     request: ResearchRequest,
+    planner: BaseResearchPlanner = Depends(get_research_planner),
     search_provider: BaseSearchProvider = Depends(get_search_provider),
     extractor: WebpageExtractor = Depends(get_webpage_extractor),
     embedding_provider: BaseEmbeddingProvider = Depends(get_embedding_provider),
@@ -108,7 +155,7 @@ async def create_research(
     llm_provider: BaseLLMProvider = Depends(get_llm_provider),
     repository: BaseResearchRepository = Depends(get_research_repository),
 ) -> ResearchResponse:
-    """Execute end-to-end research: persist session, search web, extract documents, synthesize report."""
+    """Execute end-to-end research: plan research, multi-query search, extract, embed, retrieve, synthesize report."""
     # 1. Initialize research session in database
     try:
         session_id = await repository.create_session(question=request.question)
@@ -125,42 +172,113 @@ async def create_research(
             detail="Database persistence error.",
         ) from exc
 
-    # 2. Search web for sources
+    # 2. Decompose research question into structured plan
     try:
-        sources = await search_provider.search(
-            query=request.question,
-            max_results=settings.SEARCH_MAX_RESULTS,
-        )
-    except SearchConfigError as exc:
-        logger.error("Search configuration error: %s", exc)
+        plan = await planner.create_plan(request.question)
+    except PlannerConfigError as exc:
+        logger.error("Planner configuration error: %s", exc)
         await repository.fail_session(session_id, str(exc))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
-    except SearchTimeoutError as exc:
-        logger.error("Search timeout error: %s", exc)
-        await repository.fail_session(session_id, "Search request timed out")
+    except PlannerTimeoutError as exc:
+        logger.error("Planner timeout error: %s", exc)
+        await repository.fail_session(session_id, "Planner request timed out")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="The search provider request timed out. Please try again.",
+            detail="The research planning request timed out. Please try again.",
         ) from exc
-    except SearchProviderError as exc:
-        logger.error("Search provider error: %s", exc)
-        await repository.fail_session(session_id, "Upstream search provider error")
+    except (PlannerResponseError, PlannerNetworkError) as exc:
+        logger.error("Planner error: %s", exc)
+        await repository.fail_session(session_id, str(exc))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Upstream search provider returned an error.",
+            detail=f"Research planner error: {str(exc)}",
         ) from exc
-    except SearchError as exc:
-        logger.error("General search error: %s", exc)
+    except PlannerError as exc:
+        logger.error("General planner error: %s", exc)
+        await repository.fail_session(session_id, "Planning error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while generating the research plan.",
+        ) from exc
+
+    # 3. Multi-query web search: search each sub-question's search_query concurrently with bounded concurrency
+    concurrency_limit = min(len(plan.sub_questions), 5)
+    semaphore = asyncio.Semaphore(concurrency_limit)
+    search_errors: List[Exception] = []
+
+    async def _search_sub_question(sub_q) -> List[SourceItem]:
+        async with semaphore:
+            try:
+                return await search_provider.search(
+                    query=sub_q.search_query,
+                    max_results=settings.SEARCH_MAX_RESULTS,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Search failed for sub-question '%s' (query: '%s'): %s",
+                    sub_q.id,
+                    sub_q.search_query,
+                    exc,
+                )
+                search_errors.append(exc)
+                return []
+
+    search_tasks = [_search_sub_question(sq) for sq in plan.sub_questions]
+    search_results = await asyncio.gather(*search_tasks)
+
+    all_sources: List[SourceItem] = []
+    for res in search_results:
+        all_sources.extend(res)
+
+    # Deduplicate collected sources by canonical URL
+    seen_urls = set()
+    sources: List[SourceItem] = []
+    for s in all_sources:
+        if s.url not in seen_urls:
+            seen_urls.add(s.url)
+            sources.append(s)
+
+    # If ALL searches failed and produced zero sources, inspect search_errors to raise appropriate exception
+    if not sources and search_errors:
+        config_err = next((e for e in search_errors if isinstance(e, SearchConfigError)), None)
+        if config_err:
+            logger.error("Search configuration error: %s", config_err)
+            await repository.fail_session(session_id, str(config_err))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(config_err),
+            ) from config_err
+
+        timeout_err = next((e for e in search_errors if isinstance(e, SearchTimeoutError)), None)
+        if timeout_err:
+            logger.error("All searches failed with timeout: %s", timeout_err)
+            await repository.fail_session(session_id, "Search request timed out")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="The search provider request timed out. Please try again.",
+            ) from timeout_err
+
+        provider_err = next((e for e in search_errors if isinstance(e, SearchProviderError)), None)
+        if provider_err:
+            logger.error("All searches failed with upstream error: %s", provider_err)
+            await repository.fail_session(session_id, "Upstream search provider error")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Upstream search provider returned an error.",
+            ) from provider_err
+
+        general_err = search_errors[0]
+        logger.error("All searches failed: %s", general_err)
         await repository.fail_session(session_id, "Search execution error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while executing the search.",
-        ) from exc
+        ) from general_err
 
-    # 3. Persist search sources
+    # 4. Persist search sources
     try:
         source_id_map = await repository.save_sources(session_id=session_id, sources=sources)
     except DatabaseError as exc:
@@ -171,11 +289,11 @@ async def create_research(
             detail="Database persistence error.",
         ) from exc
 
-    # 4. Concurrently extract webpage contents from collected sources
+    # 5. Concurrently extract webpage contents from collected sources
     # Individual page failures are logged and skipped
     documents = await extractor.extract_many(sources)
 
-    # 5. Persist extracted documents
+    # 6. Persist extracted documents
     try:
         doc_id_map = await repository.save_documents(
             session_id=session_id,
@@ -190,7 +308,7 @@ async def create_research(
             detail="Database persistence error.",
         ) from exc
 
-    # 6. Chunk documents, compute embeddings, and persist chunks to pgvector
+    # 7. Chunk documents, compute embeddings, and persist chunks to pgvector
     if documents:
         chunks = chunker.chunk_documents(
             documents=documents,
@@ -250,46 +368,66 @@ async def create_research(
                     detail="Database persistence error.",
                 ) from exc
 
-    # 7. Semantic retrieval: Retrieve top-K relevant chunks scoped to this research session
-    retrieved_chunks = []
+    # 8. Multi-query semantic retrieval:
+    # Use original question AND each sub-question.question for semantic retrieval
+    retrieved_chunks: List[RetrievedChunk] = []
     if documents:
-        try:
-            retrieved_chunks = await retriever.retrieve(
-                query=request.question,
-                session_id=session_id,
-                top_k=settings.RETRIEVAL_TOP_K,
-                similarity_threshold=settings.RETRIEVAL_SIMILARITY_THRESHOLD,
-            )
-        except RetrievalConfigError as exc:
-            logger.error("Retrieval configuration error: %s", exc)
-            await repository.fail_session(session_id, str(exc))
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(exc),
-            ) from exc
-        except RetrievalEmbeddingError as exc:
-            logger.error("Retrieval query embedding error: %s", exc)
-            await repository.fail_session(session_id, "Retrieval query embedding error")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=str(exc),
-            ) from exc
-        except RetrievalDatabaseError as exc:
-            logger.error("Retrieval database error: %s", exc)
-            await repository.fail_session(session_id, "Retrieval database error")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Database retrieval error.",
-            ) from exc
-        except RetrievalError as exc:
-            logger.error("General retrieval error: %s", exc)
-            await repository.fail_session(session_id, "Retrieval error")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="An error occurred during evidence retrieval.",
-            ) from exc
+        retrieval_queries = [request.question] + [sq.question for sq in plan.sub_questions]
+        chunk_map: Dict[str, RetrievedChunk] = {}
 
-    # 8. Synthesize research report via LLM provider using ONLY retrieved chunks (RAG)
+        for query_text in retrieval_queries:
+            try:
+                query_chunks = await retriever.retrieve(
+                    query=query_text,
+                    session_id=session_id,
+                    top_k=settings.RETRIEVAL_TOP_K,
+                    similarity_threshold=settings.RETRIEVAL_SIMILARITY_THRESHOLD,
+                )
+                for chunk in query_chunks:
+                    if chunk.chunk_id not in chunk_map:
+                        chunk_map[chunk.chunk_id] = chunk
+                    else:
+                        # Preserve highest similarity result when chunk retrieved multiple times
+                        if chunk.similarity > chunk_map[chunk.chunk_id].similarity:
+                            chunk_map[chunk.chunk_id] = chunk
+            except RetrievalConfigError as exc:
+                logger.error("Retrieval configuration error: %s", exc)
+                await repository.fail_session(session_id, str(exc))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=str(exc),
+                ) from exc
+            except RetrievalEmbeddingError as exc:
+                logger.error("Retrieval query embedding error: %s", exc)
+                await repository.fail_session(session_id, "Retrieval query embedding error")
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=str(exc),
+                ) from exc
+            except RetrievalDatabaseError as exc:
+                logger.error("Retrieval database error: %s", exc)
+                await repository.fail_session(session_id, "Retrieval database error")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Database retrieval error.",
+                ) from exc
+            except RetrievalError as exc:
+                logger.error("General retrieval error: %s", exc)
+                await repository.fail_session(session_id, "Retrieval error")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="An error occurred during evidence retrieval.",
+                ) from exc
+
+        # Sort deduplicated chunks by similarity descending and cap at RETRIEVAL_MAX_TOTAL_CHUNKS
+        sorted_chunks = sorted(
+            chunk_map.values(),
+            key=lambda c: c.similarity,
+            reverse=True,
+        )
+        retrieved_chunks = sorted_chunks[:settings.RETRIEVAL_MAX_TOTAL_CHUNKS]
+
+    # 9. Synthesize research report via LLM provider using ONLY retrieved chunks (RAG)
     try:
         report = await llm_provider.generate_report(
             question=request.question,
@@ -331,7 +469,7 @@ async def create_research(
             detail="An error occurred while generating the research report.",
         ) from exc
 
-    # 7. Complete session with report JSONB
+    # 10. Complete session with report JSONB
     try:
         await repository.complete_session(session_id=session_id, report=report)
     except DatabaseError as exc:
@@ -345,8 +483,9 @@ async def create_research(
         session_id=session_id,
         question=request.question,
         status="completed",
+        plan=plan,
         sources=sources,
         documents=documents,
         report=report,
-        message=f"Retrieved {len(sources)} source(s), extracted {len(documents)} document(s), and synthesized report.",
+        message=f"Planned {len(plan.sub_questions)} sub-questions, retrieved {len(sources)} source(s), and synthesized report.",
     )

@@ -1,7 +1,8 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.document import Document
+from app.schemas.planner import ResearchPlan
 from app.schemas.report import ResearchReport
 
 
@@ -20,6 +21,13 @@ class ResearchRequest(BaseModel):
         json_schema_extra={"example": "What are the latest breakthroughs in fusion energy?"},
     )
 
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Research question cannot be empty or whitespace only")
+        return v.strip()
+
 
 class ResearchResponse(BaseModel):
     session_id: Optional[str] = Field(
@@ -33,6 +41,10 @@ class ResearchResponse(BaseModel):
     status: str = Field(
         default="completed",
         description="Status of the research request (e.g. 'completed', 'error')",
+    )
+    plan: Optional[ResearchPlan] = Field(
+        default=None,
+        description="Decomposed research plan containing focused sub-questions",
     )
     sources: List[SourceItem] = Field(
         default_factory=list,

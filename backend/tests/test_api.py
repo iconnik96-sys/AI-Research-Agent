@@ -35,6 +35,16 @@ from app.services.persistence import (
     DatabaseError,
     get_research_repository,
 )
+from app.schemas.planner import ResearchPlan, ResearchSubQuestion
+from app.services.planner import (
+    BaseResearchPlanner,
+    PlannerConfigError,
+    PlannerError,
+    PlannerNetworkError,
+    PlannerResponseError,
+    PlannerTimeoutError,
+    get_research_planner,
+)
 from app.services.retrieval import (
     BaseRetriever,
     RetrievalConfigError,
@@ -52,6 +62,39 @@ from app.services.search.base import (
 from app.services.search.factory import get_search_provider
 
 
+class MockResearchPlanner(BaseResearchPlanner):
+    """Mock planner for API integration tests."""
+
+    def __init__(self, plan: Optional[ResearchPlan] = None, error: Optional[Exception] = None):
+        self.plan = plan
+        self.error = error
+        self.create_plan_calls: List[str] = []
+
+    async def create_plan(self, question: str) -> ResearchPlan:
+        if self.error:
+            raise self.error
+        self.create_plan_calls.append(question)
+        if self.plan:
+            return self.plan
+        return ResearchPlan(
+            original_question=question,
+            sub_questions=[
+                ResearchSubQuestion(
+                    id="q1",
+                    question=f"Milestones for {question}",
+                    search_query="mock search query 1",
+                    reason="Reason 1",
+                ),
+                ResearchSubQuestion(
+                    id="q2",
+                    question=f"Technologies for {question}",
+                    search_query="mock search query 2",
+                    reason="Reason 2",
+                ),
+            ],
+        )
+
+
 class MockSearchProvider(BaseSearchProvider):
     """Mock search provider for API integration tests."""
 
@@ -65,10 +108,12 @@ class MockSearchProvider(BaseSearchProvider):
             )
         ]
         self.error = error
+        self.search_calls: List[str] = []
 
     async def search(self, query: str, max_results: int = 5) -> List[SourceItem]:
         if self.error:
             raise self.error
+        self.search_calls.append(query)
         return self.sources
 
 
@@ -174,6 +219,9 @@ class MockRetriever(BaseRetriever):
         self.results = results
         self.error = error
         self.last_retrieve_call: dict = {}
+        self.retrieve_calls: List[dict] = []
+        self.default_chunk_id = str(uuid.uuid4())
+        self.default_doc_id = str(uuid.uuid4())
 
     async def retrieve(
         self,
@@ -184,18 +232,20 @@ class MockRetriever(BaseRetriever):
     ) -> List[RetrievedChunk]:
         if self.error:
             raise self.error
-        self.last_retrieve_call = {
+        call_info = {
             "query": query,
             "session_id": session_id,
             "top_k": top_k,
             "similarity_threshold": similarity_threshold,
         }
+        self.last_retrieve_call = call_info
+        self.retrieve_calls.append(call_info)
         if self.results is not None:
             return self.results
         return [
             RetrievedChunk(
-                chunk_id=str(uuid.uuid4()),
-                document_id=str(uuid.uuid4()),
+                chunk_id=self.default_chunk_id,
+                document_id=self.default_doc_id,
                 session_id=session_id or str(uuid.uuid4()),
                 chunk_index=0,
                 text="Mock retrieved chunk text for RAG synthesis.",
@@ -286,6 +336,7 @@ class MockResearchRepository(BaseResearchRepository):
 @pytest.fixture
 def client():
     app.dependency_overrides.clear()
+    app.dependency_overrides[get_research_planner] = lambda: MockResearchPlanner()
     app.dependency_overrides[get_search_provider] = lambda: MockSearchProvider()
     app.dependency_overrides[get_webpage_extractor] = lambda: MockWebpageExtractor()
     app.dependency_overrides[get_embedding_provider] = lambda: MockEmbeddingProvider()
@@ -304,6 +355,7 @@ def test_health_check(client):
 
 
 def test_research_endpoint_success(client):
+    mock_planner = MockResearchPlanner()
     mock_search = MockSearchProvider()
     mock_extractor = MockWebpageExtractor()
     mock_embedding = MockEmbeddingProvider()
@@ -311,6 +363,7 @@ def test_research_endpoint_success(client):
     mock_llm = MockLLMProvider()
     mock_repo = MockResearchRepository()
 
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
     app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
@@ -327,6 +380,15 @@ def test_research_endpoint_success(client):
     assert uuid.UUID(data["session_id"])  # verify valid UUID
     assert data["question"] == payload["question"]
     assert data["status"] == "completed"
+
+    # Verify planner was invoked and returned plan
+    assert mock_planner.create_plan_calls == [payload["question"]]
+    assert data["plan"] is not None
+    assert data["plan"]["original_question"] == payload["question"]
+    assert len(data["plan"]["sub_questions"]) == 2
+
+    # Verify search was executed using each sub-question's search_query
+    assert mock_search.search_calls == ["mock search query 1", "mock search query 2"]
 
     # Verify repository calls
     assert data["session_id"] in mock_repo.created_sessions
@@ -349,9 +411,16 @@ def test_research_endpoint_success(client):
     assert chunks[0].document_id is not None
     assert chunks[0].session_id == data["session_id"]
 
-    # Verify semantic retrieval was invoked with session_id
-    assert mock_retriever.last_retrieve_call["session_id"] == data["session_id"]
-    assert mock_retriever.last_retrieve_call["query"] == payload["question"]
+    # Verify multi-query semantic retrieval was invoked:
+    # 1. Original question, 2. Each sub_question.question
+    retrieved_query_texts = [call["query"] for call in mock_retriever.retrieve_calls]
+    assert retrieved_query_texts == [
+        payload["question"],
+        f"Milestones for {payload['question']}",
+        f"Technologies for {payload['question']}",
+    ]
+    for call in mock_retriever.retrieve_calls:
+        assert call["session_id"] == data["session_id"]
 
     # Verify LLM received ONLY retrieved chunks, not raw documents
     assert mock_llm.last_generate_call["documents"] is None
@@ -776,5 +845,173 @@ def test_retrieve_endpoint_empty_query(client):
     payload = {"query": "   "}
     response = client.post("/api/research/retrieve", json=payload)
     assert response.status_code == 422
+
+
+def test_research_endpoint_planner_config_error(client):
+    mock_planner = MockResearchPlanner(
+        error=PlannerConfigError("LLM API key is not configured for research planning.")
+    )
+    mock_repo = MockResearchRepository()
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is fusion energy?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 503
+    assert "LLM API key is not configured" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_planner_timeout(client):
+    mock_planner = MockResearchPlanner(
+        error=PlannerTimeoutError("Planner request timed out after 30.0s.")
+    )
+    mock_repo = MockResearchRepository()
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is fusion energy?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 504
+    assert "timed out" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_planner_response_error(client):
+    mock_planner = MockResearchPlanner(
+        error=PlannerResponseError("Planner generated 8 sub-questions, exceeding maximum of 5.")
+    )
+    mock_repo = MockResearchRepository()
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is fusion energy?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+    assert "Research planner error" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_planner_network_error(client):
+    mock_planner = MockResearchPlanner(
+        error=PlannerNetworkError("Network transport error during planner request")
+    )
+    mock_repo = MockResearchRepository()
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is fusion energy?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+    assert "Research planner error" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_plan_endpoint_success(client):
+    mock_planner = MockResearchPlanner()
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research/plan", json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["original_question"] == payload["question"]
+    assert len(data["sub_questions"]) == 2
+    assert data["sub_questions"][0]["id"] == "q1"
+    assert data["sub_questions"][0]["search_query"] == "mock search query 1"
+    assert mock_planner.create_plan_calls == [payload["question"]]
+
+
+def test_plan_endpoint_empty_question(client):
+    payload = {"question": "   "}
+    response = client.post("/api/research/plan", json=payload)
+    assert response.status_code == 422
+
+
+def test_plan_endpoint_config_error(client):
+    mock_planner = MockResearchPlanner(
+        error=PlannerConfigError("LLM API key is missing")
+    )
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research/plan", json=payload)
+    assert response.status_code == 503
+    assert "LLM API key is missing" in response.json()["detail"]
+
+
+def test_plan_endpoint_timeout(client):
+    mock_planner = MockResearchPlanner(
+        error=PlannerTimeoutError("Planner timed out")
+    )
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research/plan", json=payload)
+    assert response.status_code == 504
+
+
+def test_plan_endpoint_response_error(client):
+    mock_planner = MockResearchPlanner(
+        error=PlannerResponseError("Invalid JSON structure")
+    )
+    app.dependency_overrides[get_research_planner] = lambda: mock_planner
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research/plan", json=payload)
+    assert response.status_code == 502
+    assert "Research planner error" in response.json()["detail"]
+
+
+def test_research_endpoint_partial_search_failure_tolerance(client):
+    """If one sub-question search fails, the request continues with successful searches."""
+    class PartialFailureSearchProvider(BaseSearchProvider):
+        def __init__(self):
+            self.search_calls = []
+
+        async def search(self, query: str, max_results: int = 5) -> List[SourceItem]:
+            self.search_calls.append(query)
+            if "query 2" in query:
+                raise SearchTimeoutError("Upstream timeout for query 2")
+            return [
+                SourceItem(
+                    title="Successful Source From Query 1",
+                    url="https://example.com/source-from-query-1",
+                    content="Relevant content",
+                    score=0.95,
+                )
+            ]
+
+    mock_search = PartialFailureSearchProvider()
+    mock_extractor = MockWebpageExtractor(
+        documents=[
+            Document(
+                url="https://example.com/source-from-query-1",
+                title="Successful Source From Query 1",
+                text="Cleaned document content from query 1.",
+                score=0.95,
+                char_count=42,
+            )
+        ]
+    )
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What are the latest breakthroughs in fusion energy?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["session_id"] in mock_repo.completed_sessions
+    assert len(data["sources"]) == 1
+    assert data["sources"][0]["title"] == "Successful Source From Query 1"
+    assert len(mock_search.search_calls) == 2
+
+
 
 
