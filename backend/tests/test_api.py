@@ -4,9 +4,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.schemas.chunk import DocumentChunk
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport, ResearchSection, SourceReference
 from app.schemas.research import SourceItem
+from app.services.embedding import (
+    BaseEmbeddingProvider,
+    EmbeddingConfigError,
+    EmbeddingError,
+    EmbeddingProviderError,
+    EmbeddingResponseError,
+    EmbeddingTimeoutError,
+    get_embedding_provider,
+)
 from app.services.extraction import get_webpage_extractor
 from app.services.extraction.base import BaseExtractor
 from app.services.llm import (
@@ -21,6 +31,7 @@ from app.services.persistence import (
     BaseResearchRepository,
     DatabaseConfigError,
     DatabaseConnectionError,
+    DatabaseError,
     get_research_repository,
 )
 from app.services.search.base import (
@@ -108,14 +119,44 @@ class MockLLMProvider(BaseLLMProvider):
         return self.report
 
 
+class MockEmbeddingProvider(BaseEmbeddingProvider):
+    """Mock embedding provider for API integration tests."""
+
+    def __init__(self, dimensions: int = 1536, error: Optional[Exception] = None):
+        self._dimensions = dimensions
+        self.error = error
+        self.embedded_texts: List[List[str]] = []
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    async def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        if self.error:
+            raise self.error
+        self.embedded_texts.append(texts)
+        return [[0.1] * self._dimensions for _ in texts]
+
+    async def embed_text(self, text: str) -> List[float]:
+        if self.error:
+            raise self.error
+        return [0.1] * self._dimensions
+
+
 class MockResearchRepository(BaseResearchRepository):
     """Mock repository for API integration tests."""
 
-    def __init__(self, create_error: Optional[Exception] = None):
+    def __init__(
+        self,
+        create_error: Optional[Exception] = None,
+        save_chunks_error: Optional[Exception] = None,
+    ):
         self.create_error = create_error
+        self.save_chunks_error = save_chunks_error
         self.created_sessions: List[str] = []
         self.sources_saved: Dict[str, List[SourceItem]] = {}
         self.documents_saved: Dict[str, List[Document]] = {}
+        self.chunks_saved: Dict[str, List[DocumentChunk]] = {}
         self.completed_sessions: Dict[str, ResearchReport] = {}
         self.failed_sessions: Dict[str, str] = {}
 
@@ -135,8 +176,18 @@ class MockResearchRepository(BaseResearchRepository):
         session_id: str,
         documents: List[Document],
         source_id_map: Optional[Dict[str, str]] = None,
-    ) -> None:
+    ) -> Dict[str, str]:
         self.documents_saved[session_id] = documents
+        return {doc.url: str(uuid.uuid4()) for doc in documents}
+
+    async def save_chunks(
+        self,
+        session_id: str,
+        chunks: List[DocumentChunk],
+    ) -> None:
+        if self.save_chunks_error:
+            raise self.save_chunks_error
+        self.chunks_saved[session_id] = chunks
 
     async def complete_session(self, session_id: str, report: ResearchReport) -> None:
         self.completed_sessions[session_id] = report
@@ -150,6 +201,7 @@ def client():
     app.dependency_overrides.clear()
     app.dependency_overrides[get_search_provider] = lambda: MockSearchProvider()
     app.dependency_overrides[get_webpage_extractor] = lambda: MockWebpageExtractor()
+    app.dependency_overrides[get_embedding_provider] = lambda: MockEmbeddingProvider()
     app.dependency_overrides[get_llm_provider] = lambda: MockLLMProvider()
     app.dependency_overrides[get_research_repository] = lambda: MockResearchRepository()
     with TestClient(app) as test_client:
@@ -166,11 +218,13 @@ def test_health_check(client):
 def test_research_endpoint_success(client):
     mock_search = MockSearchProvider()
     mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider()
     mock_llm = MockLLMProvider()
     mock_repo = MockResearchRepository()
 
     app.dependency_overrides[get_search_provider] = lambda: mock_search
     app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
     app.dependency_overrides[get_llm_provider] = lambda: mock_llm
     app.dependency_overrides[get_research_repository] = lambda: mock_repo
 
@@ -195,6 +249,15 @@ def test_research_endpoint_success(client):
 
     assert len(data["documents"]) == 1
     assert data["documents"][0]["url"] == "https://example.com/source1"
+
+    # Verify chunks and embeddings were generated and persisted
+    assert len(mock_embedding.embedded_texts) == 1
+    chunks = mock_repo.chunks_saved.get(data["session_id"], [])
+    assert len(chunks) == 1
+    assert chunks[0].embedding is not None
+    assert len(chunks[0].embedding) == 1536
+    assert chunks[0].document_id is not None
+    assert chunks[0].session_id == data["session_id"]
 
     assert data["report"] is not None
     assert data["report"]["title"] == "Mock Research Report"
@@ -389,3 +452,101 @@ def test_research_endpoint_missing_question(client):
 def test_research_endpoint_empty_question(client):
     response = client.post("/api/research", json={"question": ""})
     assert response.status_code == 422
+
+
+def test_research_endpoint_embedding_missing_api_key(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider(
+        error=EmbeddingConfigError("Embedding API key is not configured. Please set EMBEDDING_API_KEY.")
+    )
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 503
+    assert "Embedding API key is not configured" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_embedding_timeout(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider(
+        error=EmbeddingTimeoutError("Embedding request timed out after 30.0s")
+    )
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 504
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_embedding_provider_error(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider(
+        error=EmbeddingProviderError("Upstream embedding error 500")
+    )
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_embedding_response_error(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider(
+        error=EmbeddingResponseError("Embedding dimension mismatch")
+    )
+    mock_repo = MockResearchRepository()
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 502
+    assert "Invalid response from embedding provider" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1
+
+
+def test_research_endpoint_chunk_persistence_error(client):
+    mock_search = MockSearchProvider()
+    mock_extractor = MockWebpageExtractor()
+    mock_embedding = MockEmbeddingProvider()
+    mock_repo = MockResearchRepository(
+        save_chunks_error=DatabaseError("Failed to persist chunks into database")
+    )
+
+    app.dependency_overrides[get_search_provider] = lambda: mock_search
+    app.dependency_overrides[get_webpage_extractor] = lambda: mock_extractor
+    app.dependency_overrides[get_embedding_provider] = lambda: mock_embedding
+    app.dependency_overrides[get_research_repository] = lambda: mock_repo
+
+    payload = {"question": "What is quantum computing?"}
+    response = client.post("/api/research", json=payload)
+    assert response.status_code == 500
+    assert "Database persistence error" in response.json()["detail"]
+    assert len(mock_repo.failed_sessions) == 1

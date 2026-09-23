@@ -2,10 +2,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.config import settings
 from app.db.base import Base
 
 
@@ -51,6 +53,11 @@ class ResearchSessionModel(Base):
     )
     documents: Mapped[List["DocumentModel"]] = relationship(
         "DocumentModel",
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+    chunks: Mapped[List["DocumentChunkModel"]] = relationship(
+        "DocumentChunkModel",
         back_populates="session",
         cascade="all, delete-orphan",
     )
@@ -132,4 +139,53 @@ class DocumentModel(Base):
     source: Mapped[Optional["SourceModel"]] = relationship(
         "SourceModel",
         back_populates="documents",
+    )
+    chunks: Mapped[List["DocumentChunkModel"]] = relationship(
+        "DocumentChunkModel",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
+
+
+class DocumentChunkModel(Base):
+    """Database model for a document chunk with vector embedding."""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[List[float]] = mapped_column(
+        Vector(settings.EMBEDDING_DIMENSIONS),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    session: Mapped["ResearchSessionModel"] = relationship(
+        "ResearchSessionModel",
+        back_populates="chunks",
+    )
+    document: Mapped["DocumentModel"] = relationship(
+        "DocumentModel",
+        back_populates="chunks",
     )

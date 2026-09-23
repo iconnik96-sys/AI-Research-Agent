@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
+from app.schemas.chunk import DocumentChunk
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport
 from app.schemas.research import SourceItem
@@ -44,13 +45,30 @@ class BaseResearchRepository(ABC):
         session_id: str,
         documents: List[Document],
         source_id_map: Optional[Dict[str, str]] = None,
-    ) -> None:
+    ) -> Dict[str, str]:
         """Persist extracted documents associated with the session and their source.
 
         Args:
             session_id: The session UUID string.
             documents: List of extracted Document objects.
             source_id_map: Optional mapping of URL to source UUID.
+
+        Returns:
+            Mapping of document URL to persisted document UUID string.
+        """
+        pass
+
+    @abstractmethod
+    async def save_chunks(
+        self,
+        session_id: str,
+        chunks: List[DocumentChunk],
+    ) -> None:
+        """Persist document chunks with embeddings, associated with session and documents.
+
+        Args:
+            session_id: The session UUID string.
+            chunks: List of DocumentChunk objects containing text, embeddings, and document_ids.
         """
         pass
 

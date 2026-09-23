@@ -3,6 +3,16 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.config import settings
 from app.schemas.research import ResearchRequest, ResearchResponse
+from app.services.chunking import TextChunker, get_text_chunker
+from app.services.embedding import (
+    BaseEmbeddingProvider,
+    EmbeddingConfigError,
+    EmbeddingError,
+    EmbeddingProviderError,
+    EmbeddingResponseError,
+    EmbeddingTimeoutError,
+    get_embedding_provider,
+)
 from app.services.extraction import WebpageExtractor, get_webpage_extractor
 from app.services.llm import (
     BaseLLMProvider,
@@ -38,6 +48,8 @@ async def create_research(
     request: ResearchRequest,
     search_provider: BaseSearchProvider = Depends(get_search_provider),
     extractor: WebpageExtractor = Depends(get_webpage_extractor),
+    embedding_provider: BaseEmbeddingProvider = Depends(get_embedding_provider),
+    chunker: TextChunker = Depends(get_text_chunker),
     llm_provider: BaseLLMProvider = Depends(get_llm_provider),
     repository: BaseResearchRepository = Depends(get_research_repository),
 ) -> ResearchResponse:
@@ -110,7 +122,7 @@ async def create_research(
 
     # 5. Persist extracted documents
     try:
-        await repository.save_documents(
+        doc_id_map = await repository.save_documents(
             session_id=session_id,
             documents=documents,
             source_id_map=source_id_map,
@@ -123,7 +135,67 @@ async def create_research(
             detail="Database persistence error.",
         ) from exc
 
-    # 6. Synthesize research report via LLM provider
+    # 6. Chunk documents, compute embeddings, and persist chunks to pgvector
+    if documents:
+        chunks = chunker.chunk_documents(
+            documents=documents,
+            document_id_map=doc_id_map,
+            session_id=session_id,
+        )
+        if chunks:
+            try:
+                chunk_texts = [c.text for c in chunks]
+                embeddings = await embedding_provider.embed_texts(chunk_texts)
+            except EmbeddingConfigError as exc:
+                logger.error("Embedding configuration error: %s", exc)
+                await repository.fail_session(session_id, str(exc))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=str(exc),
+                ) from exc
+            except EmbeddingTimeoutError as exc:
+                logger.error("Embedding timeout error: %s", exc)
+                await repository.fail_session(session_id, "Embedding request timed out")
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="The embedding request timed out. Please try again.",
+                ) from exc
+            except EmbeddingProviderError as exc:
+                logger.error("Embedding provider error: %s", exc)
+                await repository.fail_session(session_id, "Upstream embedding provider error")
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Upstream embedding provider returned an error.",
+                ) from exc
+            except EmbeddingResponseError as exc:
+                logger.error("Embedding response validation error: %s", exc)
+                await repository.fail_session(session_id, f"Invalid embedding response: {str(exc)}")
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Invalid response from embedding provider: {str(exc)}",
+                ) from exc
+            except EmbeddingError as exc:
+                logger.error("General embedding error: %s", exc)
+                await repository.fail_session(session_id, "Embedding generation error")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="An error occurred while generating embeddings.",
+                ) from exc
+
+            for chunk, emb in zip(chunks, embeddings):
+                chunk.embedding = emb
+
+            try:
+                await repository.save_chunks(session_id=session_id, chunks=chunks)
+            except DatabaseError as exc:
+                logger.error("Database error persisting document chunks: %s", exc)
+                await repository.fail_session(session_id, "Failed to persist document chunks")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Database persistence error.",
+                ) from exc
+
+    # 7. Synthesize research report via LLM provider
     try:
         report = await llm_provider.generate_report(
             question=request.question,

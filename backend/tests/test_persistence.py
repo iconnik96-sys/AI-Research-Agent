@@ -4,12 +4,14 @@ import pytest
 
 from app.core.config import settings
 from app.db.models import ResearchSessionModel
+from app.schemas.chunk import DocumentChunk
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport, ResearchSection, SourceReference
 from app.schemas.research import SourceItem
 from app.services.persistence.exceptions import (
     DatabaseConfigError,
     DatabaseConnectionError,
+    DatabaseError,
     SessionNotFoundError,
 )
 from app.services.persistence.repository import (
@@ -120,8 +122,9 @@ async def test_save_documents(mock_session_factory, mock_db_session, monkeypatch
         )
     ]
 
-    await repo.save_documents(test_session_id, documents, source_id_map=source_map)
+    doc_id_map = await repo.save_documents(test_session_id, documents, source_id_map=source_map)
 
+    assert "https://example.com/fusion" in doc_id_map
     mock_db_session.add_all.assert_called_once()
     mock_db_session.commit.assert_awaited_once()
 
@@ -208,3 +211,113 @@ async def test_database_connection_failure(mock_session_factory, mock_db_session
 
     with pytest.raises(DatabaseConnectionError, match="Database error creating session"):
         await repo.create_session("Question")
+
+
+@pytest.mark.anyio
+async def test_save_chunks_success(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    test_doc_id = str(uuid.uuid4())
+    chunks = [
+        DocumentChunk(
+            document_id=test_doc_id,
+            session_id=test_session_id,
+            chunk_index=0,
+            text="Chunk 1 text",
+            char_count=12,
+            embedding=[0.1] * 1536,
+        ),
+        DocumentChunk(
+            document_id=test_doc_id,
+            session_id=test_session_id,
+            chunk_index=1,
+            text="Chunk 2 text",
+            char_count=12,
+            embedding=[0.2] * 1536,
+        ),
+    ]
+
+    await repo.save_chunks(test_session_id, chunks)
+
+    mock_db_session.add_all.assert_called_once()
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_save_chunks_empty(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    await repo.save_chunks(test_session_id, [])
+
+    mock_db_session.add_all.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_save_chunks_missing_doc_id(mock_session_factory, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    chunks = [
+        DocumentChunk(
+            document_id=None,
+            session_id=test_session_id,
+            chunk_index=0,
+            text="Missing doc id",
+            char_count=14,
+            embedding=[0.1] * 1536,
+        )
+    ]
+
+    with pytest.raises(DatabaseError, match="missing required document_id"):
+        await repo.save_chunks(test_session_id, chunks)
+
+
+@pytest.mark.anyio
+async def test_save_chunks_missing_embedding(mock_session_factory, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    test_doc_id = str(uuid.uuid4())
+    chunks = [
+        DocumentChunk(
+            document_id=test_doc_id,
+            session_id=test_session_id,
+            chunk_index=0,
+            text="Missing embedding",
+            char_count=17,
+            embedding=None,
+        )
+    ]
+
+    with pytest.raises(DatabaseError, match="missing required embedding vector"):
+        await repo.save_chunks(test_session_id, chunks)
+
+
+@pytest.mark.anyio
+async def test_save_chunks_db_connection_failure(mock_session_factory, mock_db_session, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    test_doc_id = str(uuid.uuid4())
+    chunks = [
+        DocumentChunk(
+            document_id=test_doc_id,
+            session_id=test_session_id,
+            chunk_index=0,
+            text="Text",
+            char_count=4,
+            embedding=[0.1] * 1536,
+        )
+    ]
+
+    mock_db_session.commit.side_effect = Exception("DB timeout")
+
+    with pytest.raises(DatabaseConnectionError, match="Database error persisting document chunks"):
+        await repo.save_chunks(test_session_id, chunks)

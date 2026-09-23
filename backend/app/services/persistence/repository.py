@@ -4,8 +4,9 @@ from typing import Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import settings
-from app.db.models import DocumentModel, ResearchSessionModel, SourceModel
+from app.db.models import DocumentChunkModel, DocumentModel, ResearchSessionModel, SourceModel
 from app.db.session import get_session_factory
+from app.schemas.chunk import DocumentChunk
 from app.schemas.document import Document
 from app.schemas.report import ResearchReport
 from app.schemas.research import SourceItem
@@ -115,16 +116,20 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
         session_id: str,
         documents: List[Document],
         source_id_map: Optional[Dict[str, str]] = None,
-    ) -> None:
+    ) -> Dict[str, str]:
         if not documents:
-            return
+            return {}
 
         factory = self._get_factory()
         try:
             session_uuid = uuid.UUID(session_id)
+            doc_id_map: Dict[str, str] = {}
             doc_models: List[DocumentModel] = []
 
             for doc in documents:
+                doc_uuid = uuid.uuid4()
+                doc_id_map[doc.url] = str(doc_uuid)
+
                 source_uuid = None
                 if source_id_map and doc.url in source_id_map:
                     try:
@@ -134,7 +139,7 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
 
                 doc_models.append(
                     DocumentModel(
-                        id=uuid.uuid4(),
+                        id=doc_uuid,
                         session_id=session_uuid,
                         source_id=source_uuid,
                         url=doc.url,
@@ -148,10 +153,62 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
             async with factory() as db:
                 db.add_all(doc_models)
                 await db.commit()
+
+            return doc_id_map
         except Exception as exc:
             logger.error("Failed to persist documents for session %s: %s", session_id, _sanitize_error(exc))
             raise DatabaseConnectionError(
                 f"Database error persisting documents: {_sanitize_error(exc)}"
+            ) from exc
+
+    async def save_chunks(
+        self,
+        session_id: str,
+        chunks: List[DocumentChunk],
+    ) -> None:
+        if not chunks:
+            return
+
+        factory = self._get_factory()
+        try:
+            session_uuid = uuid.UUID(session_id)
+            chunk_models: List[DocumentChunkModel] = []
+
+            for chunk in chunks:
+                if not chunk.document_id:
+                    raise DatabaseError(
+                        f"Chunk index {chunk.chunk_index} is missing required document_id."
+                    )
+                if not chunk.embedding:
+                    raise DatabaseError(
+                        f"Chunk index {chunk.chunk_index} is missing required embedding vector."
+                    )
+
+                doc_uuid = uuid.UUID(chunk.document_id)
+                chunk_models.append(
+                    DocumentChunkModel(
+                        id=uuid.uuid4(),
+                        session_id=session_uuid,
+                        document_id=doc_uuid,
+                        chunk_index=chunk.chunk_index,
+                        text=chunk.text,
+                        embedding=chunk.embedding,
+                    )
+                )
+
+            async with factory() as db:
+                db.add_all(chunk_models)
+                await db.commit()
+        except DatabaseError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to persist chunks for session %s: %s",
+                session_id,
+                _sanitize_error(exc),
+            )
+            raise DatabaseConnectionError(
+                f"Database error persisting document chunks: {_sanitize_error(exc)}"
             ) from exc
 
     async def complete_session(
