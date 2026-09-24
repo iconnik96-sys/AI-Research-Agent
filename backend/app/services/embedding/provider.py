@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 from typing import List, Optional
 import httpx
 
@@ -26,6 +28,7 @@ class SupabaseEmbeddingProvider(BaseEmbeddingProvider):
         dimensions: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         batch_size: int = 4,
+        max_concurrency: Optional[int] = None,
     ):
         self.supabase_url = (
             supabase_url if supabase_url is not None else settings.SUPABASE_URL
@@ -51,6 +54,20 @@ class SupabaseEmbeddingProvider(BaseEmbeddingProvider):
             else settings.EMBEDDING_TIMEOUT_SECONDS
         )
         self.batch_size = batch_size if batch_size > 0 else 4
+
+        resolved_concurrency = max_concurrency
+        if resolved_concurrency is None:
+            resolved_concurrency = getattr(settings, "EMBEDDING_MAX_CONCURRENCY", None)
+        if resolved_concurrency is None:
+            try:
+                env_val = os.getenv("EMBEDDING_MAX_CONCURRENCY")
+                if env_val:
+                    resolved_concurrency = int(env_val)
+            except Exception:
+                resolved_concurrency = None
+        self.max_concurrency = (
+            resolved_concurrency if (resolved_concurrency and resolved_concurrency > 0) else 3
+        )
 
     @property
     def dimensions(self) -> int:
@@ -81,22 +98,29 @@ class SupabaseEmbeddingProvider(BaseEmbeddingProvider):
             headers["Authorization"] = f"Bearer {self.anon_key}"
             headers["apikey"] = self.anon_key
 
-        all_embeddings: List[List[float]] = []
+        batches = [
+            texts[i : i + self.batch_size]
+            for i in range(0, len(texts), self.batch_size)
+        ]
+
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+
+        async def _embed_batch(client: httpx.AsyncClient, batch: List[str]) -> List[List[float]]:
+            async with semaphore:
+                payload = {
+                    "input": batch,
+                }
+                response = await client.post(self.function_url, json=payload, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                return self._parse_and_validate_response(
+                    data=data, expected_count=len(batch)
+                )
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                for i in range(0, len(texts), self.batch_size):
-                    batch = texts[i : i + self.batch_size]
-                    payload = {
-                        "input": batch,
-                    }
-                    response = await client.post(self.function_url, json=payload, headers=headers)
-                    response.raise_for_status()
-                    data = response.json()
-                    batch_embeddings = self._parse_and_validate_response(
-                        data=data, expected_count=len(batch)
-                    )
-                    all_embeddings.extend(batch_embeddings)
+                tasks = [_embed_batch(client, batch) for batch in batches]
+                batch_results = await asyncio.gather(*tasks)
         except httpx.TimeoutException as exc:
             raise EmbeddingTimeoutError(
                 f"Embedding request to Supabase timed out after {self.timeout_seconds}s"
@@ -110,6 +134,10 @@ class SupabaseEmbeddingProvider(BaseEmbeddingProvider):
             raise EmbeddingNetworkError(
                 f"Network error while connecting to Supabase embedding function: {str(exc)}"
             ) from exc
+
+        all_embeddings: List[List[float]] = []
+        for batch_embeddings in batch_results:
+            all_embeddings.extend(batch_embeddings)
 
         return all_embeddings
 

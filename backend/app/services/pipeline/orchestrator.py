@@ -22,6 +22,7 @@ from app.services.llm import BaseLLMProvider
 from app.services.persistence import BaseResearchRepository
 from app.services.planner import BaseResearchPlanner
 from app.services.retrieval import BaseRetriever
+from app.services.retrieval.candidate_filter import filter_candidate_chunks
 from app.services.search import (
     BaseSearchProvider,
     SearchConfigError,
@@ -223,21 +224,35 @@ class ResearchOrchestrator:
                     session_id=session_id,
                 )
                 if chunks:
-                    chunk_texts = [c.text for c in chunks]
+                    candidate_queries = [question]
+                    if plan and plan.sub_questions:
+                        candidate_queries.extend([sq.question for sq in plan.sub_questions])
+
+                    candidate_chunks = filter_candidate_chunks(
+                        chunks=chunks,
+                        documents=documents,
+                        queries=candidate_queries,
+                        max_candidates=settings.CANDIDATE_CHUNKS_PRE_EMBED,
+                        max_per_doc=settings.CANDIDATE_CHUNKS_MAX_PER_DOC,
+                    )
+
+                    chunk_texts = [c.text for c in candidate_chunks]
                     try:
                         embeddings = await embedding_provider.embed_texts(chunk_texts)
                     except Exception as exc:
                         await repository.fail_session(session_id, str(exc))
                         raise
 
-                    for c, emb in zip(chunks, embeddings):
+                    for c, emb in zip(candidate_chunks, embeddings):
                         c.embedding = emb
 
                     try:
-                        await repository.save_chunks(session_id=session_id, chunks=chunks)
+                        await repository.save_chunks(session_id=session_id, chunks=candidate_chunks)
                     except Exception as exc:
                         await repository.fail_session(session_id, "Failed to persist document chunks")
                         raise
+
+                    chunks = candidate_chunks
             result.chunks = chunks
             stage_latencies["chunking_embedding"] = time.perf_counter() - t0
 
@@ -253,42 +268,56 @@ class ResearchOrchestrator:
                     (sq.question, "sub_question", sq.id) for sq in plan.sub_questions
                 ]
 
-                for query_text, q_type, sq_id in retrieval_specs:
-                    try:
-                        query_chunks = await retriever.retrieve(
-                            query=query_text,
-                            session_id=session_id,
-                            top_k=settings.RETRIEVAL_TOP_K,
-                            similarity_threshold=settings.RETRIEVAL_SIMILARITY_THRESHOLD,
-                        )
-                        hit = len(query_chunks) > 0
-                        if not hit:
-                            empty_retrieval_count += 1
+                concurrency_limit = getattr(settings, "RETRIEVAL_CONCURRENCY", 2) or 2
+                semaphore = asyncio.Semaphore(concurrency_limit)
 
-                        query_retrieval_results.append(
-                            QueryRetrievalResult(
+                async def _retrieve_single_spec(spec):
+                    query_text, q_type, sq_id = spec
+                    async with semaphore:
+                        try:
+                            chunks = await retriever.retrieve(
                                 query=query_text,
-                                query_type=q_type,
-                                sub_question_id=sq_id,
-                                chunks=query_chunks,
-                                hit=hit,
+                                session_id=session_id,
+                                top_k=settings.RETRIEVAL_TOP_K,
+                                similarity_threshold=settings.RETRIEVAL_SIMILARITY_THRESHOLD,
                             )
-                        )
+                            return spec, chunks
+                        except Exception as exc:
+                            await repository.fail_session(session_id, str(exc))
+                            raise
 
-                        for chunk in query_chunks:
-                            if chunk.chunk_id not in chunk_map:
-                                chunk_map[chunk.chunk_id] = chunk
-                            elif chunk.similarity > chunk_map[chunk.chunk_id].similarity:
-                                chunk_map[chunk.chunk_id] = chunk
-                    except Exception as exc:
-                        await repository.fail_session(session_id, str(exc))
-                        raise
+                try:
+                    spec_results = await asyncio.gather(
+                        *[_retrieve_single_spec(spec) for spec in retrieval_specs]
+                    )
+                except Exception:
+                    raise
+
+                for (query_text, q_type, sq_id), query_chunks in spec_results:
+                    hit = len(query_chunks) > 0
+                    if not hit:
+                        empty_retrieval_count += 1
+
+                    query_retrieval_results.append(
+                        QueryRetrievalResult(
+                            query=query_text,
+                            query_type=q_type,
+                            sub_question_id=sq_id,
+                            chunks=query_chunks,
+                            hit=hit,
+                        )
+                    )
+
+                    for chunk in query_chunks:
+                        if chunk.chunk_id not in chunk_map:
+                            chunk_map[chunk.chunk_id] = chunk
+                        elif chunk.similarity > chunk_map[chunk.chunk_id].similarity:
+                            chunk_map[chunk.chunk_id] = chunk
 
             result.query_retrieval_results = query_retrieval_results
             sorted_chunks = sorted(
                 chunk_map.values(),
-                key=lambda c: c.similarity,
-                reverse=True,
+                key=lambda c: (-c.similarity, str(c.chunk_id)),
             )
             retrieved_chunks = sorted_chunks[:settings.RETRIEVAL_MAX_TOTAL_CHUNKS]
             result.retrieved_chunks = retrieved_chunks

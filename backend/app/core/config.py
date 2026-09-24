@@ -51,9 +51,11 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSIONS: int = 384
     EMBEDDING_TIMEOUT_SECONDS: float = 30.0
 
-    # Chunking Service Settings
+    # Chunking & Candidate Pre-Filtering Settings
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
+    CANDIDATE_CHUNKS_PRE_EMBED: int = 60
+    CANDIDATE_CHUNKS_MAX_PER_DOC: int = 6
 
     # Planner Service Settings
     PLANNER_MAX_SUB_QUESTIONS: int = 5
@@ -63,12 +65,14 @@ class Settings(BaseSettings):
     RETRIEVAL_TOP_K: int = 5
     RETRIEVAL_SIMILARITY_THRESHOLD: Optional[float] = None
     RETRIEVAL_MAX_TOTAL_CHUNKS: int = 15
+    RETRIEVAL_CONCURRENCY: int = 2
 
     # Claim & Verification Settings
     CLAIM_MAX_COUNT: int = 15
     CLAIM_EXTRACTION_TIMEOUT_SECONDS: float = 30.0
     CLAIM_VERIFICATION_TIMEOUT_SECONDS: float = 30.0
     CLAIM_VERIFICATION_CONCURRENCY: int = 5
+    CLAIM_VERIFICATION_BATCHED: bool = True
 
     # Database Settings (Supabase PostgreSQL via asyncpg)
     DATABASE_URL: str = ""
