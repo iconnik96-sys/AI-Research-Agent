@@ -173,9 +173,7 @@ class EvaluationRunner:
         summary = calculate_evaluation_run_summary(results)
 
         model_name = getattr(self.llm_provider, "model", None) or getattr(settings, "LLM_MODEL", "unknown")
-        embedding_model = getattr(self.embedding_provider, "model", None) or getattr(
-            settings, "EMBEDDING_MODEL", "unknown"
-        )
+        embedding_model = getattr(self.embedding_provider, "model", None) or "gte-small"
 
         metadata = {
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
     text TEXT NOT NULL,
-    embedding vector(1536) NOT NULL,
+    embedding vector(384) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 

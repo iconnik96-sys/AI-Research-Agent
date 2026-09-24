@@ -451,7 +451,7 @@ async def test_orchestrator_persist_false_cleans_up_and_captures():
     mock_chunker.chunk_documents.return_value = [chunk]
 
     mock_embedding = AsyncMock()
-    mock_embedding.embed_texts.return_value = [[0.1] * 1536]
+    mock_embedding.embed_texts.return_value = [[0.1] * 384]
 
     retrieved_chunk = RetrievedChunk(
         chunk_id="c1",

@@ -1,6 +1,6 @@
 import pytest
 import httpx
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.schemas.research import SourceItem
 from app.services.extraction.exceptions import (
@@ -9,7 +9,7 @@ from app.services.extraction.exceptions import (
     FetchTimeoutError,
     InvalidResponseError,
 )
-from app.services.extraction.webpage import WebpageExtractor
+from app.services.extraction.webpage import WebpageExtractor, sanitize_document_text
 
 
 @pytest.mark.anyio
@@ -211,3 +211,129 @@ async def test_extract_many_fault_tolerance():
         assert len(docs) == 1
         assert docs[0].url == "https://example.com/good"
         assert "Good Page" in docs[0].text
+
+
+def test_sanitization_removes_nul_bytes():
+    """Verify sanitize_document_text removes NUL bytes, trims whitespace, and handles None."""
+    assert sanitize_document_text(None) == ""
+    assert sanitize_document_text("") == ""
+    assert sanitize_document_text("   ") == ""
+    assert sanitize_document_text("Hello\x00World") == "HelloWorld"
+    assert sanitize_document_text("\x00\x00Clean Text\x00\x00") == "Clean Text"
+    assert sanitize_document_text("  Valid Text \n Here  ") == "Valid Text \n Here"
+
+
+def test_successful_pdf_extraction():
+    """Verify parse_pdf extracts text across pages, sanitizes, and sets document metadata."""
+    extractor = WebpageExtractor()
+
+    mock_page1 = MagicMock()
+    mock_page1.extract_text.return_value = "Page 1: Recent advancements in magnetic confinement fusion."
+    mock_page2 = MagicMock()
+    mock_page2.extract_text.return_value = "Page 2: High-temperature superconducting magnets achieved 20 Tesla."
+
+    mock_reader = MagicMock()
+    mock_reader.pages = [mock_page1, mock_page2]
+    mock_reader.metadata.title = "Fusion Progress Report 2026"
+
+    with patch("app.services.extraction.webpage.PdfReader", return_value=mock_reader):
+        doc = extractor.parse_pdf(
+            pdf_bytes=b"%PDF-1.4 mock binary content",
+            url="https://example.com/report.pdf",
+            fallback_title=None,
+            score=0.92,
+        )
+
+        assert doc.url == "https://example.com/report.pdf"
+        assert doc.title == "Fusion Progress Report 2026"
+        assert "Page 1: Recent advancements" in doc.text
+        assert "Page 2: High-temperature superconducting" in doc.text
+        assert doc.score == 0.92
+        assert doc.char_count == len(doc.text)
+        assert "\x00" not in doc.text
+
+
+def test_pdf_with_binary_and_nul_bytes():
+    """Verify parse_pdf strips any embedded NUL characters from extracted PDF text."""
+    extractor = WebpageExtractor()
+
+    mock_page = MagicMock()
+    # Emulate dirty text with embedded NUL characters
+    mock_page.extract_text.return_value = "Breakthrough\x00 fusion\x00 roadmap\x00 with valid content for researchers."
+
+    mock_reader = MagicMock()
+    mock_reader.pages = [mock_page]
+    mock_reader.metadata.title = "Dirty\x00 PDF Title"
+
+    with patch("app.services.extraction.webpage.PdfReader", return_value=mock_reader):
+        doc = extractor.parse_pdf(
+            pdf_bytes=b"%PDF-1.4 raw binary with \x00 bytes",
+            url="https://example.com/fusion-st-roadmap",
+            fallback_title=None,
+            score=0.88,
+        )
+
+        assert "\x00" not in doc.text
+        assert "\x00" not in doc.title
+        assert "Breakthrough fusion roadmap with valid content" in doc.text
+        assert doc.title == "Dirty PDF Title"
+
+
+def test_empty_pdf_extraction():
+    """Verify parse_pdf raises ExtractionContentError when PDF yields no usable text."""
+    extractor = WebpageExtractor()
+
+    mock_page = MagicMock()
+    mock_page.extract_text.return_value = ""
+
+    mock_reader = MagicMock()
+    mock_reader.pages = [mock_page]
+    mock_reader.metadata = None
+
+    with patch("app.services.extraction.webpage.PdfReader", return_value=mock_reader):
+        with pytest.raises(ExtractionContentError, match="does not contain sufficient usable text"):
+            extractor.parse_pdf(
+                pdf_bytes=b"%PDF-1.4 empty pdf",
+                url="https://example.com/empty.pdf",
+            )
+
+
+@pytest.mark.anyio
+async def test_pdf_detection_by_content_type():
+    """Verify extract detects Content-Type application/pdf and routes to parse_pdf."""
+    extractor = WebpageExtractor()
+
+    mock_response = httpx.Response(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=b"%PDF-1.4 binary content",
+        request=httpx.Request("GET", "https://example.com/document"),
+    )
+
+    with patch.object(httpx.AsyncClient, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        with patch.object(extractor, "parse_pdf") as mock_parse_pdf:
+            mock_parse_pdf.return_value = MagicMock()
+            await extractor.extract("https://example.com/document")
+            mock_parse_pdf.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_pdf_detection_by_magic_bytes():
+    """Verify extract detects PDF magic bytes even if Content-Type is generic."""
+    extractor = WebpageExtractor()
+
+    mock_response = httpx.Response(
+        status_code=200,
+        headers={"Content-Type": "application/octet-stream"},
+        content=b"%PDF-1.6 binary stream",
+        request=httpx.Request("GET", "https://example.com/unknown-type"),
+    )
+
+    with patch.object(httpx.AsyncClient, "get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        with patch.object(extractor, "parse_pdf") as mock_parse_pdf:
+            mock_parse_pdf.return_value = MagicMock()
+            await extractor.extract("https://example.com/unknown-type")
+            mock_parse_pdf.assert_called_once()
+

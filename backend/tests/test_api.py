@@ -206,7 +206,7 @@ class MockLLMProvider(BaseLLMProvider):
 class MockEmbeddingProvider(BaseEmbeddingProvider):
     """Mock embedding provider for API integration tests."""
 
-    def __init__(self, dimensions: int = 1536, error: Optional[Exception] = None):
+    def __init__(self, dimensions: int = 384, error: Optional[Exception] = None):
         self._dimensions = dimensions
         self.error = error
         self.embedded_texts: List[List[str]] = []
@@ -539,7 +539,7 @@ def test_research_endpoint_success(client):
     chunks = mock_repo.chunks_saved.get(data["session_id"], [])
     assert len(chunks) == 1
     assert chunks[0].embedding is not None
-    assert len(chunks[0].embedding) == 1536
+    assert len(chunks[0].embedding) == 384
     assert chunks[0].document_id is not None
     assert chunks[0].session_id == data["session_id"]
 
@@ -758,7 +758,7 @@ def test_research_endpoint_embedding_missing_api_key(client):
     mock_search = MockSearchProvider()
     mock_extractor = MockWebpageExtractor()
     mock_embedding = MockEmbeddingProvider(
-        error=EmbeddingConfigError("Embedding API key is not configured. Please set EMBEDDING_API_KEY.")
+        error=EmbeddingConfigError("Supabase embedding function URL is not configured. Please set SUPABASE_EMBEDDING_FUNCTION_URL or SUPABASE_URL.")
     )
     mock_repo = MockResearchRepository()
 
@@ -770,7 +770,7 @@ def test_research_endpoint_embedding_missing_api_key(client):
     payload = {"question": "What is quantum computing?"}
     response = client.post("/api/research", json=payload)
     assert response.status_code == 503
-    assert "Embedding API key is not configured" in response.json()["detail"]
+    assert "Supabase embedding function URL is not configured" in response.json()["detail"]
     assert len(mock_repo.failed_sessions) == 1
 
 

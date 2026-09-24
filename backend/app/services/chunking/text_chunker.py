@@ -108,6 +108,8 @@ class TextChunker:
         all_chunks: List[DocumentChunk] = []
         for doc in documents:
             doc_id = document_id_map.get(doc.url) if document_id_map else None
+            if document_id_map is not None and not doc_id:
+                continue
             chunks = self.chunk_document(doc, document_id=doc_id, session_id=session_id)
             all_chunks.extend(chunks)
         return all_chunks

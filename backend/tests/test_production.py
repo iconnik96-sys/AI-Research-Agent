@@ -27,7 +27,7 @@ def test_production_validation_success():
         DATABASE_URL="postgresql+asyncpg://user:realpassword@host:5432/db",
         TAVILY_API_KEY="tvly-secretkey",
         LLM_API_KEY="sk-llmsecret",
-        EMBEDDING_API_KEY="sk-embsecret",
+        SUPABASE_EMBEDDING_FUNCTION_URL="https://mock.supabase.co/functions/v1/embed",
         CORS_ORIGINS=["https://app.example.com"],
     )
     # Should not raise
@@ -41,7 +41,8 @@ def test_production_validation_missing_keys():
         DATABASE_URL="",
         TAVILY_API_KEY="",
         LLM_API_KEY="",
-        EMBEDDING_API_KEY="",
+        SUPABASE_EMBEDDING_FUNCTION_URL="",
+        SUPABASE_URL="",
         CORS_ORIGINS=["https://app.example.com"],
     )
     with pytest.raises(ValueError, match="Production configuration validation failed") as exc_info:
@@ -51,7 +52,7 @@ def test_production_validation_missing_keys():
     assert "DATABASE_URL must be configured" in err_msg
     assert "TAVILY_API_KEY must be configured" in err_msg
     assert "LLM_API_KEY must be configured" in err_msg
-    assert "EMBEDDING_API_KEY must be configured" in err_msg
+    assert "SUPABASE_EMBEDDING_FUNCTION_URL or SUPABASE_URL must be configured" in err_msg
 
 
 def test_production_validation_placeholder_database_url():
@@ -61,7 +62,7 @@ def test_production_validation_placeholder_database_url():
         DATABASE_URL="postgresql+asyncpg://postgres:[YOUR-PASSWORD]@db.[YOUR-PROJECT-REF].supabase.co:5432/postgres",
         TAVILY_API_KEY="tvly-valid",
         LLM_API_KEY="sk-valid",
-        EMBEDDING_API_KEY="sk-valid",
+        SUPABASE_EMBEDDING_FUNCTION_URL="https://mock.supabase.co/functions/v1/embed",
         CORS_ORIGINS=["https://app.example.com"],
     )
     with pytest.raises(ValueError, match="placeholder credentials"):
@@ -75,7 +76,7 @@ def test_production_validation_wildcard_cors_rejected():
         DATABASE_URL="postgresql+asyncpg://user:pass@host:5432/db",
         TAVILY_API_KEY="tvly-valid",
         LLM_API_KEY="sk-valid",
-        EMBEDDING_API_KEY="sk-valid",
+        SUPABASE_EMBEDDING_FUNCTION_URL="https://mock.supabase.co/functions/v1/embed",
         CORS_ORIGINS=["*"],
     )
     with pytest.raises(ValueError, match="Wildcard '\\*' in CORS_ORIGINS is forbidden in production"):
@@ -89,7 +90,8 @@ def test_development_mode_allows_blank_keys():
         DATABASE_URL="",
         TAVILY_API_KEY="",
         LLM_API_KEY="",
-        EMBEDDING_API_KEY="",
+        SUPABASE_EMBEDDING_FUNCTION_URL="",
+        SUPABASE_URL="",
         CORS_ORIGINS=["*"],
     )
     # Should not raise in development

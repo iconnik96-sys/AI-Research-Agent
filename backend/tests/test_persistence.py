@@ -132,6 +132,72 @@ async def test_save_documents(mock_session_factory, mock_db_session, monkeypatch
 
 
 @pytest.mark.anyio
+async def test_save_documents_sanitizes_nul_bytes(mock_session_factory, mock_db_session, monkeypatch):
+    """Verify save_documents strips \x00 bytes before inserting into PostgreSQL."""
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    documents = [
+        Document(
+            url="https://example.com/pdf-with-nul",
+            title="Roadmap\x00 Title",
+            text="Scientific\x00 text with NUL\x00 bytes from raw binary.",
+            score=0.9,
+            char_count=50,
+        )
+    ]
+
+    doc_id_map = await repo.save_documents(test_session_id, documents)
+
+    assert "https://example.com/pdf-with-nul" in doc_id_map
+    # Check the persisted model passed to db.add_all
+    call_args = mock_db_session.add_all.call_args[0][0]
+    persisted_doc = call_args[0]
+    assert "\x00" not in persisted_doc.text
+    assert "\x00" not in persisted_doc.title
+    assert persisted_doc.text == "Scientific text with NUL bytes from raw binary."
+    assert persisted_doc.title == "Roadmap Title"
+
+
+@pytest.mark.anyio
+async def test_save_documents_skips_empty_text(mock_session_factory, mock_db_session, monkeypatch):
+    """Verify save_documents skips empty documents gracefully without failing."""
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
+    repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
+
+    test_session_id = str(uuid.uuid4())
+    documents = [
+        Document(
+            url="https://example.com/empty-doc",
+            title="Empty Doc",
+            text="   \x00\x00  ",
+            score=0.5,
+            char_count=5,
+        ),
+        Document(
+            url="https://example.com/valid-doc",
+            title="Valid Doc",
+            text="Valid extracted content that should be saved.",
+            score=0.9,
+            char_count=45,
+        ),
+    ]
+
+    doc_id_map = await repo.save_documents(test_session_id, documents)
+
+    # Empty doc should be skipped
+    assert "https://example.com/empty-doc" not in doc_id_map
+    assert "https://example.com/valid-doc" in doc_id_map
+
+    # Only 1 model should be passed to add_all
+    call_args = mock_db_session.add_all.call_args[0][0]
+    assert len(call_args) == 1
+    assert call_args[0].url == "https://example.com/valid-doc"
+
+
+
+@pytest.mark.anyio
 async def test_complete_session_success(mock_session_factory, mock_db_session, monkeypatch):
     monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
     repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
@@ -229,7 +295,7 @@ async def test_save_chunks_success(mock_session_factory, mock_db_session, monkey
             chunk_index=0,
             text="Chunk 1 text",
             char_count=12,
-            embedding=[0.1] * 1536,
+            embedding=[0.1] * 384,
         ),
         DocumentChunk(
             document_id=test_doc_id,
@@ -237,7 +303,7 @@ async def test_save_chunks_success(mock_session_factory, mock_db_session, monkey
             chunk_index=1,
             text="Chunk 2 text",
             char_count=12,
-            embedding=[0.2] * 1536,
+            embedding=[0.2] * 384,
         ),
     ]
 
@@ -271,7 +337,7 @@ async def test_save_chunks_missing_doc_id(mock_session_factory, monkeypatch):
             chunk_index=0,
             text="Missing doc id",
             char_count=14,
-            embedding=[0.1] * 1536,
+            embedding=[0.1] * 384,
         )
     ]
 
@@ -315,7 +381,7 @@ async def test_save_chunks_db_connection_failure(mock_session_factory, mock_db_s
             chunk_index=0,
             text="Text",
             char_count=4,
-            embedding=[0.1] * 1536,
+            embedding=[0.1] * 384,
         )
     ]
 
@@ -349,7 +415,7 @@ async def test_search_similar_chunks_success(mock_session_factory, mock_db_sessi
     mock_db_session.execute.return_value = mock_result
 
     results = await repo.search_similar_chunks(
-        query_embedding=[0.1] * 1536,
+        query_embedding=[0.1] * 384,
         session_id=str(test_session_id),
         top_k=3,
         similarity_threshold=0.8,
@@ -381,7 +447,7 @@ async def test_search_similar_chunks_invalid_session_uuid(mock_session_factory, 
     monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://mock:mock@localhost:5432/mock")
     repo = SQLAlchemyResearchRepository(session_factory=mock_session_factory)
     with pytest.raises(DatabaseError, match="Invalid session_id format"):
-        await repo.search_similar_chunks(query_embedding=[0.1] * 1536, session_id="not-a-uuid")
+        await repo.search_similar_chunks(query_embedding=[0.1] * 384, session_id="not-a-uuid")
 
 
 @pytest.mark.anyio
@@ -392,7 +458,7 @@ async def test_search_similar_chunks_db_error(mock_session_factory, mock_db_sess
     mock_db_session.execute.side_effect = Exception("DB query failed")
 
     with pytest.raises(DatabaseConnectionError, match="Database error during similarity search"):
-        await repo.search_similar_chunks(query_embedding=[0.1] * 1536)
+        await repo.search_similar_chunks(query_embedding=[0.1] * 384)
 
 
 @pytest.mark.anyio

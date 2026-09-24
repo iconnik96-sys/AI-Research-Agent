@@ -44,11 +44,11 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: float = 30.0
     LLM_MAX_CHARS_PER_DOC: int = 4000
 
-    # Embedding Service Settings
-    EMBEDDING_API_KEY: str = ""
-    EMBEDDING_BASE_URL: str = "https://api.openai.com/v1"
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
-    EMBEDDING_DIMENSIONS: int = 1536
+    # Supabase Edge Function Embedding Settings (Supabase.ai gte-small, 384 dimensions)
+    SUPABASE_URL: str = ""
+    SUPABASE_ANON_KEY: str = ""
+    SUPABASE_EMBEDDING_FUNCTION_URL: str = ""
+    EMBEDDING_DIMENSIONS: int = 384
     EMBEDDING_TIMEOUT_SECONDS: float = 30.0
 
     # Chunking Service Settings
@@ -118,8 +118,8 @@ class Settings(BaseSettings):
         if not self.LLM_API_KEY or not self.LLM_API_KEY.strip():
             errors.append("LLM_API_KEY must be configured in production.")
 
-        if not self.EMBEDDING_API_KEY or not self.EMBEDDING_API_KEY.strip():
-            errors.append("EMBEDDING_API_KEY must be configured in production.")
+        if not self.SUPABASE_EMBEDDING_FUNCTION_URL and not self.SUPABASE_URL:
+            errors.append("SUPABASE_EMBEDDING_FUNCTION_URL or SUPABASE_URL must be configured for embedding generation in production.")
 
         origins = self.CORS_ORIGINS if isinstance(self.CORS_ORIGINS, list) else [self.CORS_ORIGINS]
         if "*" in origins:

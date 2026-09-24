@@ -126,7 +126,7 @@ async def main_async() -> int:
         dataset_path=args.dataset,
         case_count=len(dataset.cases),
         model=getattr(runner.llm_provider, "model", settings.LLM_MODEL),
-        embedding_model=getattr(runner.embedding_provider, "model", settings.EMBEDDING_MODEL),
+        embedding_model=getattr(runner.embedding_provider, "model", "gte-small"),
     )
 
     report = await runner.run(

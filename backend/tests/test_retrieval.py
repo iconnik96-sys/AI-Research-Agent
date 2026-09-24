@@ -26,19 +26,19 @@ class FakeEmbeddingProvider(BaseEmbeddingProvider):
 
     @property
     def dimensions(self) -> int:
-        return 1536
+        return 384
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         if self.error:
             raise self.error
         self.embedded_texts.extend(texts)
-        return [[0.1] * 1536 for _ in texts]
+        return [[0.1] * 384 for _ in texts]
 
     async def embed_text(self, text: str) -> List[float]:
         if self.error:
             raise self.error
         self.embedded_texts.append(text)
-        return [0.1] * 1536
+        return [0.1] * 384
 
 
 class FakeResearchRepository(BaseResearchRepository):
@@ -171,13 +171,13 @@ async def test_retrieve_success_ordering_and_limiting():
 @pytest.mark.anyio
 async def test_retrieve_embedding_config_error():
     emb_provider = FakeEmbeddingProvider(
-        error=EmbeddingConfigError("Missing EMBEDDING_API_KEY")
+        error=EmbeddingConfigError("Missing Supabase embedding function URL")
     )
     retriever = PgVectorRetriever(
         embedding_provider=emb_provider,
         repository=FakeResearchRepository(),
     )
-    with pytest.raises(RetrievalConfigError, match="Missing EMBEDDING_API_KEY"):
+    with pytest.raises(RetrievalConfigError, match="Missing Supabase embedding function URL"):
         await retriever.retrieve("fusion")
 
 

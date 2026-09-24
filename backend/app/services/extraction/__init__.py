@@ -7,7 +7,11 @@ from app.services.extraction.exceptions import (
     FetchTimeoutError,
     InvalidResponseError,
 )
-from app.services.extraction.webpage import WebpageExtractor
+from app.services.extraction.webpage import (
+    WebpageExtractor,
+    extract_pdf_text,
+    sanitize_document_text,
+)
 
 
 def get_webpage_extractor() -> WebpageExtractor:
@@ -24,4 +28,6 @@ __all__ = [
     "InvalidResponseError",
     "ExtractionContentError",
     "get_webpage_extractor",
+    "sanitize_document_text",
+    "extract_pdf_text",
 ]

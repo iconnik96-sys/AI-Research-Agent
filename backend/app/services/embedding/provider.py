@@ -15,20 +15,31 @@ from app.services.embedding.exceptions import (
 logger = logging.getLogger(__name__)
 
 
-class OpenAICompatibleEmbeddingProvider(BaseEmbeddingProvider):
-    """Embedding provider communicating with OpenAI-compatible embedding APIs."""
+class SupabaseEmbeddingProvider(BaseEmbeddingProvider):
+    """Embedding provider using Supabase Edge Function with built-in Supabase.ai (gte-small)."""
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        model: Optional[str] = None,
+        function_url: Optional[str] = None,
+        anon_key: Optional[str] = None,
+        supabase_url: Optional[str] = None,
         dimensions: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
+        batch_size: int = 4,
     ):
-        self.api_key = api_key if api_key is not None else settings.EMBEDDING_API_KEY
-        self.base_url = base_url if base_url is not None else settings.EMBEDDING_BASE_URL
-        self.model = model if model is not None else settings.EMBEDDING_MODEL
+        self.supabase_url = (
+            supabase_url if supabase_url is not None else settings.SUPABASE_URL
+        )
+        self.function_url = (
+            function_url
+            if function_url is not None
+            else settings.SUPABASE_EMBEDDING_FUNCTION_URL
+        )
+        if not self.function_url and self.supabase_url:
+            self.function_url = f"{self.supabase_url.rstrip('/')}/functions/v1/embed"
+
+        self.anon_key = anon_key if anon_key is not None else settings.SUPABASE_ANON_KEY
+        self.model = "gte-small"
         self._dimensions = (
             dimensions
             if dimensions is not None
@@ -39,60 +50,68 @@ class OpenAICompatibleEmbeddingProvider(BaseEmbeddingProvider):
             if timeout_seconds is not None
             else settings.EMBEDDING_TIMEOUT_SECONDS
         )
+        self.batch_size = batch_size if batch_size > 0 else 4
 
     @property
     def dimensions(self) -> int:
         return self._dimensions
 
     async def embed_text(self, text: str) -> List[float]:
-        """Generate embedding vector for a single text."""
+        """Generate 384-dimensional embedding vector for a single query text."""
         results = await self.embed_texts([text])
         if not results:
             raise EmbeddingResponseError("No embedding vector returned for text.")
         return results[0]
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """Generate embedding vectors for a list of texts."""
+        """Generate 384-dimensional embedding vectors for a list of texts via Supabase Edge Function."""
         if not texts:
             return []
 
-        # Validate credentials: if not a local address, require API key
-        is_local = "localhost" in self.base_url.lower() or "127.0.0.1" in self.base_url.lower()
-        if not is_local and (not self.api_key or not self.api_key.strip()):
+        if not self.function_url or not self.function_url.strip():
             raise EmbeddingConfigError(
-                "Embedding API key is not configured. Please set EMBEDDING_API_KEY in your environment."
+                "Supabase embedding function URL is not configured. "
+                "Please set SUPABASE_EMBEDDING_FUNCTION_URL or SUPABASE_URL in your environment."
             )
 
-        endpoint = f"{self.base_url.rstrip('/')}/embeddings"
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        payload = {
-            "model": self.model,
-            "input": texts,
+        headers = {
+            "Content-Type": "application/json",
         }
+        if self.anon_key and self.anon_key.strip():
+            headers["Authorization"] = f"Bearer {self.anon_key}"
+            headers["apikey"] = self.anon_key
+
+        all_embeddings: List[List[float]] = []
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(endpoint, json=payload, headers=headers)
-                response.raise_for_status()
-                data = response.json()
+                for i in range(0, len(texts), self.batch_size):
+                    batch = texts[i : i + self.batch_size]
+                    payload = {
+                        "input": batch,
+                    }
+                    response = await client.post(self.function_url, json=payload, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    batch_embeddings = self._parse_and_validate_response(
+                        data=data, expected_count=len(batch)
+                    )
+                    all_embeddings.extend(batch_embeddings)
         except httpx.TimeoutException as exc:
             raise EmbeddingTimeoutError(
-                f"Embedding request timed out after {self.timeout_seconds}s"
+                f"Embedding request to Supabase timed out after {self.timeout_seconds}s"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise EmbeddingProviderError(
-                f"Embedding provider error HTTP {exc.response.status_code}: {exc.response.text}",
+                f"Supabase embedding function error HTTP {exc.response.status_code}: {exc.response.text}",
                 status_code=exc.response.status_code,
             ) from exc
         except httpx.RequestError as exc:
             raise EmbeddingNetworkError(
-                f"Network error while connecting to embedding provider: {str(exc)}"
+                f"Network error while connecting to Supabase embedding function: {str(exc)}"
             ) from exc
 
-        return self._parse_and_validate_response(data=data, expected_count=len(texts))
+        return all_embeddings
 
     def _parse_and_validate_response(
         self,
@@ -100,23 +119,24 @@ class OpenAICompatibleEmbeddingProvider(BaseEmbeddingProvider):
         expected_count: int,
     ) -> List[List[float]]:
         if not isinstance(data, dict):
-            raise EmbeddingResponseError("Embedding response must be a JSON object.")
+            raise EmbeddingResponseError("Supabase embedding response must be a JSON object.")
 
-        items = data.get("data")
+        items = data.get("embeddings")
         if not isinstance(items, list):
-            raise EmbeddingResponseError("Embedding response missing valid 'data' array.")
+            if "embedding" in data and isinstance(data["embedding"], list):
+                items = [data["embedding"]]
+            elif "data" in data and isinstance(data["data"], list):
+                items = [item.get("embedding") if isinstance(item, dict) else item for item in data["data"]]
+            else:
+                raise EmbeddingResponseError("Supabase embedding response missing valid 'embeddings' array.")
 
         if len(items) != expected_count:
             raise EmbeddingResponseError(
                 f"Embedding count mismatch: expected {expected_count}, received {len(items)}"
             )
 
-        # Sort items by index to preserve input ordering
-        sorted_items = sorted(items, key=lambda x: x.get("index", 0))
-
         embeddings: List[List[float]] = []
-        for idx, item in enumerate(sorted_items):
-            emb = item.get("embedding")
+        for idx, emb in enumerate(items):
             if not isinstance(emb, list):
                 raise EmbeddingResponseError(f"Embedding item {idx} is not a valid list.")
             if len(emb) != self._dimensions:

@@ -1,0 +1,5 @@
+# Supabase CLI configuration
+project_id = "iqtbzqhxtbbbzkfwlmfa"
+
+[functions.embed]
+verify_jwt = false

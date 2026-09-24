@@ -32,3 +32,5 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+
+commands.txt

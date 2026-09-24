@@ -8,11 +8,11 @@ from app.services.embedding.exceptions import (
     EmbeddingTimeoutError,
 )
 from app.services.embedding.factory import get_embedding_provider
-from app.services.embedding.provider import OpenAICompatibleEmbeddingProvider
+from app.services.embedding.provider import SupabaseEmbeddingProvider
 
 __all__ = [
     "BaseEmbeddingProvider",
-    "OpenAICompatibleEmbeddingProvider",
+    "SupabaseEmbeddingProvider",
     "get_embedding_provider",
     "EmbeddingError",
     "EmbeddingConfigError",

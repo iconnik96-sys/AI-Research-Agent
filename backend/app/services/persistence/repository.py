@@ -21,6 +21,7 @@ from app.schemas.evidence import EvidenceItem
 from app.schemas.report import ResearchReport
 from app.schemas.research import SourceItem
 from app.schemas.retrieval import RetrievedChunk
+from app.services.extraction.webpage import sanitize_document_text
 from app.services.persistence.base import BaseResearchRepository
 from app.services.persistence.exceptions import (
     DatabaseConfigError,
@@ -100,13 +101,15 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
             for s in sources:
                 src_id = uuid.uuid4()
                 url_to_id[s.url] = str(src_id)
+                clean_title = sanitize_document_text(s.title, url=s.url)
+                clean_content = sanitize_document_text(s.content, url=s.url)
                 source_models.append(
                     SourceModel(
                         id=src_id,
                         session_id=session_uuid,
-                        title=s.title,
+                        title=clean_title or "Untitled Source",
                         url=s.url,
-                        content=s.content,
+                        content=clean_content,
                         score=s.score,
                     )
                 )
@@ -138,6 +141,29 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
             doc_models: List[DocumentModel] = []
 
             for doc in documents:
+                # 1. Sanitize text and title
+                sanitized_text = sanitize_document_text(doc.text, url=doc.url)
+                sanitized_title = sanitize_document_text(doc.title, url=doc.url) or "Untitled"
+
+                # 2. Skip documents with empty extracted text
+                if not sanitized_text:
+                    logger.warning(
+                        "Document skipped because extracted text is empty for URL '%s' (session %s)",
+                        doc.url,
+                        session_id,
+                    )
+                    continue
+
+                # 3. Validate that no document contains a NUL character before DB persistence
+                if "\x00" in sanitized_text:
+                    raise ValueError(f"Document text contains NUL character for URL: {doc.url}")
+                if "\x00" in sanitized_title:
+                    raise ValueError(f"Document title contains NUL character for URL: {doc.url}")
+
+                doc.text = sanitized_text
+                doc.title = sanitized_title
+                doc.char_count = len(sanitized_text)
+
                 doc_uuid = uuid.uuid4()
                 doc_id_map[doc.url] = str(doc_uuid)
 
@@ -154,18 +180,27 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
                         session_id=session_uuid,
                         source_id=source_uuid,
                         url=doc.url,
-                        title=doc.title,
-                        text=doc.text,
-                        char_count=doc.char_count,
+                        title=sanitized_title,
+                        text=sanitized_text,
+                        char_count=len(sanitized_text),
                         score=doc.score,
                     )
                 )
+
+            if not doc_models:
+                logger.warning(
+                    "All documents skipped (no valid non-empty text) for session %s",
+                    session_id,
+                )
+                return {}
 
             async with factory() as db:
                 db.add_all(doc_models)
                 await db.commit()
 
             return doc_id_map
+        except ValueError:
+            raise
         except Exception as exc:
             logger.error("Failed to persist documents for session %s: %s", session_id, _sanitize_error(exc))
             raise DatabaseConnectionError(
@@ -195,6 +230,10 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
                         f"Chunk index {chunk.chunk_index} is missing required embedding vector."
                     )
 
+                clean_text = sanitize_document_text(chunk.text)
+                if "\x00" in clean_text:
+                    raise ValueError(f"Chunk text contains NUL character for chunk {chunk.chunk_index}")
+
                 doc_uuid = uuid.UUID(chunk.document_id)
                 chunk_models.append(
                     DocumentChunkModel(
@@ -202,7 +241,7 @@ class SQLAlchemyResearchRepository(BaseResearchRepository):
                         session_id=session_uuid,
                         document_id=doc_uuid,
                         chunk_index=chunk.chunk_index,
-                        text=chunk.text,
+                        text=clean_text,
                         embedding=chunk.embedding,
                     )
                 )

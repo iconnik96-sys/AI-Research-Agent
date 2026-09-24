@@ -12,7 +12,7 @@ The system consists of:
 - **External AI/Search Services**:
   - Web Search: Tavily API
   - LLM Synthesis: OpenAI-compatible API (`gpt-4o-mini`)
-  - Embeddings: OpenAI-compatible API (`text-embedding-3-small`, 1536 dimensions)
+  - Embeddings: Supabase built-in AI inference (`gte-small`, 384 dimensions) via Supabase Edge Function
 
 ```text
 [ Client (Browser / Next.js / React) ]
@@ -67,9 +67,10 @@ All secrets and environment-specific settings must be provided as environment va
 | `LLM_API_KEY` | Yes | None | API key for LLM report synthesis. |
 | `LLM_BASE_URL` | No | `https://api.openai.com/v1` | Base URL for OpenAI-compatible chat API. |
 | `LLM_MODEL` | No | `gpt-4o-mini` | LLM model identifier. |
-| `EMBEDDING_API_KEY` | Yes | None | API key for generating vector embeddings. |
-| `EMBEDDING_BASE_URL` | No | `https://api.openai.com/v1` | Base URL for OpenAI-compatible embeddings API. |
-| `EMBEDDING_MODEL` | No | `text-embedding-3-small`| Embedding model name (1536 dimensions). |
+| `SUPABASE_URL` | No | None | Base URL for your Supabase project (e.g. `https://[ref].supabase.co`). |
+| `SUPABASE_ANON_KEY` | No | None | Supabase public anon key (optional if Edge Function deployed with `--no-verify-jwt`). |
+| `SUPABASE_EMBEDDING_FUNCTION_URL` | Yes | None | Full URL to the embed Edge Function (`https://[ref].supabase.co/functions/v1/embed`). |
+| `EMBEDDING_DIMENSIONS` | No | `384` | Vector dimensionality for Supabase.ai `gte-small`. |
 | `RATE_LIMIT_ENABLED` | No | `true` | Toggle in-memory rate limiting. |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | No | `10` | Max requests per minute per IP for research endpoints. |
 
@@ -80,8 +81,9 @@ All secrets and environment-specific settings must be provided as environment va
 Before launching the backend, run the migration scripts in sequential order against your Supabase PostgreSQL database:
 
 1. **`001_initial_schema.sql`**: Creates `research_sessions`, `sources`, and `documents` tables with foreign key cascades and indexes.
-2. **`002_pgvector_chunks.sql`**: Enables the `vector` extension and creates the `document_chunks` table with `vector(1536)` embeddings.
+2. **`002_pgvector_chunks.sql`**: Enables the `vector` extension and creates the `document_chunks` table with `vector(384)` embeddings.
 3. **`003_claim_verification.sql`**: Creates `claims` and `claim_evidence` tables for independent verification and evidence traceability.
+4. **`004_update_vector_dim_384.sql`**: Updates existing `document_chunks` tables from `vector(1536)` to `vector(384)`.
 
 > [!NOTE]
 > If connecting to Supabase via the Transaction Pooler (port `6543`), the application automatically sets `statement_cache_size: 0` in `connect_args` for full PgBouncer compatibility.
@@ -148,7 +150,7 @@ docker run -d \
   -e DATABASE_URL="postgresql+asyncpg://..." \
   -e TAVILY_API_KEY="tvly-..." \
   -e LLM_API_KEY="sk-..." \
-  -e EMBEDDING_API_KEY="sk-..." \
+  -e SUPABASE_EMBEDDING_FUNCTION_URL="https://[YOUR-PROJECT-REF].supabase.co/functions/v1/embed" \
   -e CORS_ORIGINS='["https://your-frontend.com"]' \
   ai-research-agent-backend:latest
 ```
@@ -166,7 +168,7 @@ docker run -d \
    - `DATABASE_URL`: Your Supabase connection string.
    - `TAVILY_API_KEY`: Your Tavily API key.
    - `LLM_API_KEY`: Your OpenAI/LLM API key.
-   - `EMBEDDING_API_KEY`: Your OpenAI/Embedding API key.
+   - `SUPABASE_EMBEDDING_FUNCTION_URL`: `https://[YOUR-PROJECT-REF].supabase.co/functions/v1/embed`
    - `CORS_ORIGINS`: `["https://your-frontend.vercel.app"]`
 5. Configure Health Check:
    - **Health Check Path**: `/health`
