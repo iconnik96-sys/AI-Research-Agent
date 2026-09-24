@@ -84,6 +84,7 @@ Before launching the backend, run the migration scripts in sequential order agai
 2. **`002_pgvector_chunks.sql`**: Enables the `vector` extension and creates the `document_chunks` table with `vector(384)` embeddings.
 3. **`003_claim_verification.sql`**: Creates `claims` and `claim_evidence` tables for independent verification and evidence traceability.
 4. **`004_update_vector_dim_384.sql`**: Updates existing `document_chunks` tables from `vector(1536)` to `vector(384)`.
+5. **`005_enable_rls.sql`**: Enables Row Level Security (RLS) on all research tables with strict default-deny for PostgREST public access.
 
 > [!NOTE]
 > If connecting to Supabase via the Transaction Pooler (port `6543`), the application automatically sets `statement_cache_size: 0` in `connect_args` for full PgBouncer compatibility.
